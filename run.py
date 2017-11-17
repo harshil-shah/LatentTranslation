@@ -63,90 +63,62 @@ class RunWords(object):
             with open(os.path.join(self.load_param_dir, 'recog_params.save'), 'rb') as f:
                 self.vb.recognition_model.set_param_values(cPickle.load(f))
 
+    def load_words(self, folder, files, load_batch_size):
+
+        words = []
+
+        for f in files:
+            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
+                words += json.loads(s.read())
+
+        L = np.array([len(w) for w in words])
+
+        max_L = max(L)
+
+        word_arrays = []
+
+        start = time.clock()
+
+        batches_loaded = 0
+
+        for i in range(0, len(L), load_batch_size):
+
+            L_i = L[i: i+load_batch_size]
+
+            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
+            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max_L)] = \
+                np.concatenate(words[i: i+load_batch_size])
+
+            word_arrays.append(word_array)
+
+            batches_loaded += 1
+
+            print(str(batches_loaded) + ' batches loaded (time taken = ' + str(time.clock() - start) +
+                  ' seconds)')
+
+        del words
+
+        return np.concatenate(word_arrays), L
+
     def load_data(self, dataset, train_prop, load_batch_size=500000):
 
         folder = '../_datasets/' + dataset
 
-        files_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0')])
-        files_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1')])
+        files_0_both = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0_both')])
+        files_0_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0_test')])
+        files_1_both = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1_both')])
+        files_1_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1_test')])
 
-        words_0 = []
-        words_1 = []
+        print('loading 0 both')
+        x_0_both_train, L_0_both_train = self.load_words(folder, files_0_both, load_batch_size)
+        print('loading 0 test')
+        x_0_test, L_0_test = self.load_words(folder, files_0_test, load_batch_size)
+        print('loading 1 both')
+        x_1_both_train, L_1_both_train = self.load_words(folder, files_1_both, load_batch_size)
+        print('loading 1 test')
+        x_1_test, L_1_test = self.load_words(folder, files_1_test, load_batch_size)
 
-        for f in files_0:
-            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
-                words_0 += json.loads(s.read())
-
-        for f in files_1:
-            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
-                words_1 += json.loads(s.read())
-
-        L_0 = np.array([len(s) for s in words_0])
-        L_1 = np.array([len(s) for s in words_1])
-
-        max_L = max(np.concatenate((L_0, L_1)))
-
-        word_arrays_0 = []
-
-        start = time.clock()
-
-        batches_0_loaded = 0
-
-        for i in range(0, len(L_0), load_batch_size):
-
-            L_i = L_0[i: i+load_batch_size]
-
-            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
-            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max(L_0))] = \
-                np.concatenate(words_0[i: i+load_batch_size])
-
-            word_arrays_0.append(word_array)
-
-            del L_i, word_array
-
-            batches_0_loaded += 1
-
-            print(str(batches_0_loaded) + ' batches x_0 loaded (time taken = ' + str(time.clock() - start) +
-                  ' seconds)')
-
-        del words_0
-
-        words_to_return_0 = np.concatenate(word_arrays_0)
-
-        word_arrays_1 = []
-
-        start = time.clock()
-
-        batches_1_loaded = 0
-
-        for i in range(0, len(L_1), load_batch_size):
-
-            L_i = L_1[i: i+load_batch_size]
-
-            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
-            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max(L_1))] = \
-                np.concatenate(words_1[i: i+load_batch_size])
-
-            word_arrays_1.append(word_array)
-
-            del L_i, word_array
-
-            batches_1_loaded += 1
-
-            print(str(batches_1_loaded) + ' batches x_1 loaded (time taken = ' + str(time.clock() - start) +
-                  ' seconds)')
-
-        del words_1
-
-        words_to_return_1 = np.concatenate(word_arrays_1)
-
-        np.random.seed(1234)
-
-        training_mask = np.random.rand(len(words_to_return_0)) < train_prop
-
-        return words_to_return_0[training_mask], words_to_return_0[~training_mask], words_to_return_1[training_mask], \
-               words_to_return_1[~training_mask], L_0[training_mask], L_0[~training_mask], L_1[training_mask], \
-               L_1[~training_mask]
+        return x_0_both_train, x_0_test, x_1_both_train, x_1_test, L_0_both_train, L_0_test, L_1_both_train, L_1_test
 
     def call_elbo_fn(self, elbo_fn, x_0, x_1):
 
@@ -234,7 +206,7 @@ class RunWords(object):
 
     def get_translation_fn(self, from_index, beam_size):
 
-        return self.vb.translate_fn_sampling(from_index, beam_size, num_samples=50)
+        return self.vb.translate_fn_sampling(from_index, beam_size, num_samples=10)
 
     def call_translation_fn(self, translation_fn, from_index, num_outputs, num_iterations):
 
@@ -631,109 +603,66 @@ class RunWordsSSL(object):
             with open(os.path.join(self.load_param_dir, 'recog_params.save'), 'rb') as f:
                 self.vb.recognition_model.set_param_values(cPickle.load(f))
 
+    def load_words(self, folder, files, load_batch_size):
+
+        words = []
+
+        for f in files:
+            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
+                words += json.loads(s.read())
+
+        L = np.array([len(w) for w in words])
+
+        max_L = max(L)
+
+        word_arrays = []
+
+        start = time.clock()
+
+        batches_loaded = 0
+
+        for i in range(0, len(L), load_batch_size):
+
+            L_i = L[i: i+load_batch_size]
+
+            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
+            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max_L)] = \
+                np.concatenate(words[i: i+load_batch_size])
+
+            word_arrays.append(word_array)
+
+            batches_loaded += 1
+
+            print(str(batches_loaded) + ' batches loaded (time taken = ' + str(time.clock() - start) +
+                  ' seconds)')
+
+        del words
+
+        return np.concatenate(word_arrays), L
+
     def load_data(self, dataset, train_prop, load_batch_size=500000):
 
         folder = '../_datasets/' + dataset
 
-        files_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0')])
-        files_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1')])
+        files_0_only = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0_only')])
+        files_0_both = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0_both')])
+        files_0_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_0_test')])
+        files_1_only = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1_only')])
+        files_1_both = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1_both')])
+        files_1_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_1_test')])
 
-        words_0 = []
-        words_1 = []
-
-        for f in files_0:
-            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
-                words_0 += json.loads(s.read())
-
-        for f in files_1:
-            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
-                words_1 += json.loads(s.read())
-
-        L_0 = np.array([len(s) for s in words_0])
-        L_1 = np.array([len(s) for s in words_1])
-
-        max_L = max(np.concatenate((L_0, L_1)))
-
-        word_arrays_0 = []
-
-        start = time.clock()
-
-        batches_0_loaded = 0
-
-        for i in range(0, len(L_0), load_batch_size):
-
-            L_i = L_0[i: i+load_batch_size]
-
-            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
-            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max(L_0))] = \
-                np.concatenate(words_0[i: i+load_batch_size])
-
-            word_arrays_0.append(word_array)
-
-            del L_i, word_array
-
-            batches_0_loaded += 1
-
-            print(str(batches_0_loaded) + ' batches x_0 loaded (time taken = ' + str(time.clock() - start) +
-                  ' seconds)')
-
-        del words_0
-
-        words_to_return_0 = np.concatenate(word_arrays_0)
-
-        word_arrays_1 = []
-
-        start = time.clock()
-
-        batches_1_loaded = 0
-
-        for i in range(0, len(L_1), load_batch_size):
-
-            L_i = L_1[i: i+load_batch_size]
-
-            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
-            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max(L_1))] = \
-                np.concatenate(words_1[i: i+load_batch_size])
-
-            word_arrays_1.append(word_array)
-
-            del L_i, word_array
-
-            batches_1_loaded += 1
-
-            print(str(batches_1_loaded) + ' batches x_1 loaded (time taken = ' + str(time.clock() - start) +
-                  ' seconds)')
-
-        del words_1
-
-        words_to_return_1 = np.concatenate(word_arrays_1)
-
-        np.random.seed(1234)
-
-        training_mask = np.random.rand(len(words_to_return_0)) < train_prop
-
-        x_0_train = words_to_return_0[training_mask]
-        x_0_test = words_to_return_0[~training_mask]
-        x_1_train = words_to_return_1[training_mask]
-        x_1_test = words_to_return_1[~training_mask]
-
-        L_0_train = L_0[training_mask]
-        L_0_test = L_0[~training_mask]
-        L_1_train = L_1[training_mask]
-        L_1_test = L_1[~training_mask]
-
-        n_training = len(L_0_train)
-        n_only = int(train_prop*n_training)
-
-        x_0_only_train = x_0_train[:n_only]
-        x_0_both_train = x_0_train[n_only:]
-        x_1_only_train = x_1_train[:n_only]
-        x_1_both_train = x_1_train[n_only:]
-
-        L_0_only_train = L_0_train[:n_only]
-        L_0_both_train = L_0_train[n_only:]
-        L_1_only_train = L_1_train[:n_only]
-        L_1_both_train = L_1_train[n_only:]
+        print('loading 0 only')
+        x_0_only_train, L_0_only_train = self.load_words(folder, files_0_only, load_batch_size)
+        print('loading 0 both')
+        x_0_both_train, L_0_both_train = self.load_words(folder, files_0_both, load_batch_size)
+        print('loading 0 test')
+        x_0_test, L_0_test = self.load_words(folder, files_0_test, load_batch_size)
+        print('loading 1 only')
+        x_1_only_train, L_1_only_train = self.load_words(folder, files_1_only, load_batch_size)
+        print('loading 1 both')
+        x_1_both_train, L_1_both_train = self.load_words(folder, files_1_both, load_batch_size)
+        print('loading 1 test')
+        x_1_test, L_1_test = self.load_words(folder, files_1_test, load_batch_size)
 
         return x_0_only_train, x_0_both_train, x_0_test, x_1_only_train, x_1_both_train, x_1_test, L_0_only_train, \
             L_0_both_train, L_0_test, L_1_only_train, L_1_both_train, L_1_test
@@ -854,20 +783,9 @@ class RunWordsSSL(object):
         if from_index == 0:
             valid_vocab_from = self.valid_vocab_0
             valid_vocab_to = self.valid_vocab_1
-
-            # best_guess = self.call_generate_output_posterior_only(generate_output_posterior_fn,
-            #                                                       x_test_from,
-            #                                                       0)['generated_x_1_beam_posterior']
         else:
             valid_vocab_from = self.valid_vocab_1
             valid_vocab_to = self.valid_vocab_0
-
-            # best_guess = self.call_generate_output_posterior_only(generate_output_posterior_fn,
-            #                                                       x_test_from,
-            #                                                       1)['generated_x_0_beam_posterior']
-
-
-        # best_guess = -1. * np.ones((num_outputs, self.max_length))
 
         print('')
 
@@ -921,9 +839,9 @@ class RunWordsSSL(object):
 
         print('='*10)
 
-    def train(self, n_iter, batch_size, num_samples, word_drop=None, grad_norm_constraint=None, update=adam,
-              update_kwargs=None, warm_up=None, val_freq=None, val_batch_size=0, val_num_samples=0, val_print_gen=5,
-              val_beam_size=15, save_params_every=None):
+    def train(self, n_iter, only_batch_size, both_batch_size, num_samples, word_drop=None, grad_norm_constraint=None,
+              update=adam, update_kwargs=None, warm_up=None, val_freq=None, val_batch_size=0, val_num_samples=0,
+              val_print_gen=5, val_beam_size=15, save_params_every=None):
 
         if self.pre_trained:
             with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
@@ -948,13 +866,13 @@ class RunWordsSSL(object):
 
             start = time.clock()
 
-            batch_indices_0_only = np.random.choice(len(self.x_0_only_train), batch_size)
+            batch_indices_0_only = np.random.choice(len(self.x_0_only_train), only_batch_size)
             batch_0_only = np.array([self.x_0_only_train[ind] for ind in batch_indices_0_only])
 
-            batch_indices_1_only = np.random.choice(len(self.x_1_only_train), batch_size)
+            batch_indices_1_only = np.random.choice(len(self.x_1_only_train), only_batch_size)
             batch_1_only = np.array([self.x_1_only_train[ind] for ind in batch_indices_1_only])
 
-            batch_indices_both = np.random.choice(len(self.x_0_both_train), batch_size)
+            batch_indices_both = np.random.choice(len(self.x_0_both_train), both_batch_size)
             batch_0_both = np.array([self.x_0_both_train[ind] for ind in batch_indices_both])
             batch_1_both = np.array([self.x_1_both_train[ind] for ind in batch_indices_both])
 
@@ -1012,8 +930,8 @@ class RunWordsSSL(object):
             elbo, kl_both = optimiser(batch_0_only, batch_1_only, batch_0_both, batch_1_both, beta, drop_mask_0_only,
                                       drop_mask_1_only, drop_mask_0_both, drop_mask_1_both)
 
-            print('Iteration ' + str(i + 1) + ': ELBO = ' + str(elbo/batch_size) + ' (KL (both) = ' +
-                  str(kl_both/batch_size) + ') per data point (time taken = ' + str(time.clock() - start) + ' seconds)')
+            print('Iteration ' + str(i + 1) + ': ELBO = ' + str(elbo) + ' (KL (both) = ' + str(kl_both)
+                  + ') per data point (time taken = ' + str(time.clock() - start) + ' seconds)')
 
             if val_freq is not None and i % val_freq == 0:
 
@@ -1023,8 +941,7 @@ class RunWordsSSL(object):
 
                 val_elbo, val_kl_both = elbo_fn(val_batch_0, val_batch_1)
 
-                print('Test set ELBO = ' + str(val_elbo/val_batch_size) + ' (KL (both) = ' + str(val_kl_both/batch_size)
-                      + ') per data point')
+                print('Test set ELBO = ' + str(val_elbo) + ' (KL (both) = ' + str(val_kl_both) + ') per data point')
 
                 # output_prior = self.call_generate_output_prior(generate_output_prior)
                 #

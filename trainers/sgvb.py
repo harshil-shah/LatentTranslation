@@ -377,7 +377,7 @@ class SGVBWordsSSL(object):
         else:
             elbo = T.sum((1. / num_samples) * (log_p_x_0 + log_p_x_1)) - T.sum(beta * kl)
 
-        return elbo, T.sum(kl)
+        return (1. / x_0.shape[0]) * elbo, T.mean(kl)
 
     def symbolic_elbo_0_only(self, x_0, num_samples, beta=None, drop_mask_0=None):
 
@@ -399,7 +399,7 @@ class SGVBWordsSSL(object):
         else:
             elbo = T.sum((1. / num_samples) * log_p_x_0) - T.sum(beta * kl)
 
-        return elbo, T.sum(kl)
+        return (1. / x_0.shape[0]) * elbo, T.mean(kl)
 
     def symbolic_elbo_1_only(self, x_1, num_samples, beta=None, drop_mask_1=None):
 
@@ -421,85 +421,17 @@ class SGVBWordsSSL(object):
         else:
             elbo = T.sum((1. / num_samples) * log_p_x_1) - T.sum(beta * kl)
 
-        return elbo, T.sum(kl)
+        return (1. / x_1.shape[0]) * elbo, T.mean(kl)
 
     def symbolic_elbo_all(self, x_0_only, x_1_only, x_0_both, x_1_both, num_samples, beta=None, drop_mask_0_only=None,
                           drop_mask_1_only=None, drop_mask_0_both=None, drop_mask_1_both=None):
 
-        # 0 only
+        elbo_0_only, _ = self.symbolic_elbo_0_only(x_0_only, num_samples, beta, drop_mask_0_only)
+        elbo_1_only, _ = self.symbolic_elbo_1_only(x_1_only, num_samples, beta, drop_mask_1_only)
+        elbo_both, kl_both = self.symbolic_elbo_both(x_0_both, x_1_both, num_samples, beta, drop_mask_0_both,
+                                                     drop_mask_1_both)
 
-        x_0_only_embedded = self.embedder(x_0_only, self.all_embeddings_0)  # N * max(L) * E
-
-        z_0_only, kl_0_only = self.recognition_model.get_samples_and_kl_std_gaussian_0_only(x_0_only, x_0_only_embedded,
-                                                                                            num_samples)
-        # (S*N) * dim(z) and N
-
-        if drop_mask_0_only is None:
-            x_0_only_embedded_dropped = x_0_only_embedded
-        else:
-            x_0_only_embedded_dropped = x_0_only_embedded * T.shape_padright(drop_mask_0_only)
-
-        log_p_x_0_only = self.generative_model_0.log_p_x(x_0_only, x_0_only_embedded, x_0_only_embedded_dropped,
-                                                         z_0_only, self.all_embeddings_0)  # (S*N)
-
-        if beta is None:
-            elbo_0_only = T.sum((1. / num_samples) * log_p_x_0_only) - T.sum(kl_0_only)
-        else:
-            elbo_0_only = T.sum((1. / num_samples) * log_p_x_0_only) - T.sum(beta * kl_0_only)
-
-        # 1 only
-
-        x_1_only_embedded = self.embedder(x_1_only, self.all_embeddings_1)  # N * max(L) * E
-
-        z_1_only, kl_1_only = self.recognition_model.get_samples_and_kl_std_gaussian_1_only(x_1_only, x_1_only_embedded,
-                                                                                            num_samples)
-        # (S*N) * dim(z) and N
-
-        if drop_mask_1_only is None:
-            x_1_only_embedded_dropped = x_1_only_embedded
-        else:
-            x_1_only_embedded_dropped = x_1_only_embedded * T.shape_padright(drop_mask_1_only)
-
-        log_p_x_1_only = self.generative_model_1.log_p_x(x_1_only, x_1_only_embedded, x_1_only_embedded_dropped,
-                                                         z_1_only, self.all_embeddings_1)  # (S*N)
-
-        if beta is None:
-            elbo_1_only = T.sum((1. / num_samples) * log_p_x_1_only) - T.sum(kl_1_only)
-        else:
-            elbo_1_only = T.sum((1. / num_samples) * log_p_x_1_only) - T.sum(beta * kl_1_only)
-
-        # both
-
-        x_0_both_embedded = self.embedder(x_0_both, self.all_embeddings_0)  # N * max(L) * E
-        x_1_both_embedded = self.embedder(x_1_both, self.all_embeddings_1)  # N * max(L) * E
-
-        z_both, kl_both = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0_both, x_0_both_embedded,
-                                                                                      x_1_both, x_1_both_embedded,
-                                                                                      num_samples)
-        # (S*N) * dim(z) and N
-
-        if drop_mask_0_both is None:
-            x_0_both_embedded_dropped = x_0_both_embedded
-        else:
-            x_0_both_embedded_dropped = x_0_both_embedded * T.shape_padright(drop_mask_0_both)
-
-        if drop_mask_1_both is None:
-            x_1_both_embedded_dropped = x_1_both_embedded
-        else:
-            x_1_both_embedded_dropped = x_1_both_embedded * T.shape_padright(drop_mask_1_both)
-
-        log_p_x_0_both = self.generative_model_0.log_p_x(x_0_both, x_0_both_embedded, x_0_both_embedded_dropped, z_both,
-                                                         self.all_embeddings_0)  # (S*N)
-
-        log_p_x_1_both = self.generative_model_1.log_p_x(x_1_both, x_1_both_embedded, x_1_both_embedded_dropped, z_both,
-                                                         self.all_embeddings_1)  # (S*N)
-
-        if beta is None:
-            elbo_both = T.sum((1. / num_samples) * (log_p_x_0_both + log_p_x_1_both)) - T.sum(kl_both)
-        else:
-            elbo_both = T.sum((1. / num_samples) * (log_p_x_0_both + log_p_x_1_both)) - T.sum(beta * kl_both)
-
-        return elbo_0_only + elbo_1_only + elbo_both, T.sum(kl_both)
+        return elbo_0_only + elbo_1_only + elbo_both, kl_both
 
     def elbo_fn_both(self, num_samples):
 

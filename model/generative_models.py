@@ -1,8 +1,8 @@
 import numpy as np
 import theano
 import theano.tensor as T
-from lasagne.layers import DenseLayer, get_all_param_values, get_all_params, get_output, InputLayer, LSTMLayer, \
-    RecurrentLayer, set_all_param_values
+from lasagne.layers import ConcatLayer, DenseLayer, get_all_param_values, get_all_params, get_output, InputLayer, \
+    LSTMLayer, RecurrentLayer, set_all_param_values
 from nn.layers import CanvasRNNLayer
 
 from .utilities import last_d_softmax
@@ -26,6 +26,11 @@ class GenAUTRWords(object):
         self.nn_canvas_rnn_hid_units = nn_kwargs['rnn_hid_units']
         self.nn_canvas_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
         self.nn_canvas_rnn_time_steps = nn_kwargs['rnn_time_steps']
+
+        try:
+            self.nn_canvas_rnn_separate_updates = nn_kwargs['rnn_separate_updates']
+        except KeyError:
+            self.nn_canvas_rnn_separate_updates = False
 
         self.nn_read_attention_nn_depth = nn_kwargs['read_attention_nn_depth']
         self.nn_read_attention_nn_hid_units = nn_kwargs['read_attention_nn_hid_units']
@@ -91,7 +96,8 @@ class GenAUTRWords(object):
         l_in = InputLayer((None, None, self.z_dim))
 
         l_1 = CanvasRNNLayer(l_in, num_units=self.nn_canvas_rnn_hid_units, max_length=self.max_length,
-                             embedding_size=self.embedding_dim, only_return_final=True)
+                             embedding_size=self.embedding_dim, separate_updates=self.nn_canvas_rnn_separate_updates,
+                             only_return_final=True)
 
         return l_1
 
@@ -1298,17 +1304,27 @@ class GenRNNMultipleLatents(object):
         self.dist_z = dist_z()
         self.dist_x = dist_x()
 
-        self.rnn = self.rnn_fn()
+        self.rnn_in, self.rnn = self.rnn_fn()
 
     def rnn_fn(self):
 
-        l_in = InputLayer((None, self.max_length, self.z_dim + self.embedding_dim))
+        l_in_z = InputLayer((None, self.max_length, self.z_dim))
+
+        l_in_x = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_in = ConcatLayer([l_in_z, l_in_x], axis=-1)
 
         l_1 = LSTMLayer(l_in, num_units=self.nn_rnn_hid_units, nonlinearity=self.nn_rnn_hid_nonlinearity)
 
-        l_out = RecurrentLayer(l_1, num_units=self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=None)
+        l_concat = ConcatLayer([l_in_z, l_1], axis=-1)
 
-        return l_out
+        l_out = RecurrentLayer(l_concat, num_units=self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=None)
+
+        return (l_in_z, l_in_x), l_out
+
+    def log_p_z(self, z):
+
+        return self.dist_z.log_density(z)
 
     def get_probs(self, x, x_dropped, z, all_embeddings, mode='all'):
         """
@@ -1327,7 +1343,8 @@ class GenRNNMultipleLatents(object):
         x_pre_padded = T.concatenate([T.zeros((SN, 1, self.embedding_dim)), x_dropped], axis=1)[:, :-1]  # (S*N) *
         # max(L) * E
 
-        target_embeddings = get_output(self.rnn, T.concatenate((z, x_pre_padded), axis=-1))  # (S*N) * max(L) * E
+        target_embeddings = get_output(self.rnn, {self.rnn_in[0]: z,
+                                                  self.rnn_in[1]: x_pre_padded})  # (S*N) * max(L) * E
 
         probs_numerators = T.sum(x * target_embeddings, axis=-1)  # (S*N) * max(L)
 
@@ -1389,7 +1406,10 @@ class GenRNNMultipleLatents(object):
             x_pre_padded = T.concatenate([T.zeros((N*beam_size, 1, self.embedding_dim)), active_paths_embedded],
                                          axis=1)[:, :-1]  # (N*B) * max(L) * E
 
-            rnn_input = T.concatenate((T.repeat(z, beam_size, 0), x_pre_padded), axis=-1)  # (N*B) * max(L) * (dim(z)+E)
+            # rnn_input = T.concatenate((T.repeat(z, beam_size, 0), x_pre_padded), axis=-1)  # (N*B) * max(L) * (dim(z)+E)
+
+            rnn_input = {self.rnn_in[0]: T.repeat(z, beam_size, 0),
+                         self.rnn_in[1]: x_pre_padded}
 
             target_embeddings = get_output(self.rnn, rnn_input)[:, l].reshape((N, beam_size, self.embedding_dim))
             # N * B * E
@@ -1399,6 +1419,75 @@ class GenRNNMultipleLatents(object):
             probs = last_d_softmax(probs_denominators)  # N * B * D
 
             scores = T.shape_padright(best_scores_lm1) + T.log(probs)  # N * B * D
+
+            best_scores_l_all = T.max(scores, axis=1)  # N * D
+
+            best_scores_l = T.sort(best_scores_l_all, axis=-1)[:, -beam_size:]  # N * B
+
+            active_words_l = T.argsort(best_scores_l_all, axis=1)[:, -beam_size:]  # N * B
+
+            best_paths_l_all = T.argmax(scores, axis=1)  # N * D
+
+            best_paths_l_inds = best_paths_l_all[T.repeat(T.arange(N), beam_size), active_words_l.flatten()]
+            best_paths_l_inds = best_paths_l_inds.reshape((N, beam_size))  # N * B
+
+            best_paths_l = active_paths_current[T.repeat(T.arange(N), beam_size), best_paths_l_inds.flatten()].reshape(
+                (N, beam_size, self.max_length))  # N * B * max(L)
+
+            active_paths_new = T.set_subtensor(best_paths_l[:, :, l], active_words_l)
+
+            return best_scores_l, active_paths_new
+
+        ([best_scores, active_paths], _) = theano.scan(step_forward,
+                                                       sequences=T.arange(self.max_length),
+                                                       outputs_info=[best_scores_0, active_paths_init],
+                                                       non_sequences=[all_embeddings]
+                                                       )
+        # max(L) * N * B and max(L) * N * B * max(L)
+
+        active_paths = active_paths[-1]  # N * B * max(L)
+
+        words = active_paths[:, -1]  # N * max(L)
+
+        return T.cast(words, 'int32')
+
+    def beam_search_samples(self, z, all_embeddings, beam_size, num_samples, num_time_steps=None):
+
+        N = T.cast(z.shape[0] / num_samples, 'int32')
+
+        log_p_z = self.log_p_z(z)  # (S*N)
+
+        best_scores_0 = T.zeros((N, beam_size))  # N * B
+        active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
+
+        def step_forward(l, best_scores_lm1, active_paths_current, all_embeddings):
+
+            active_paths_embedded = self.embedder(T.cast(active_paths_current, 'int32'), all_embeddings)  # N * B *
+            # max(L) * E
+
+            active_paths_embedded = active_paths_embedded.reshape((N * beam_size, self.max_length, self.embedding_dim))
+            # (N*B) * max(L) * E
+
+            active_paths_embedded = T.tile(active_paths_embedded, (num_samples, 1, 1))  # (S*N*B) *  max(L) * E
+
+            x_pre_padded = T.concatenate([T.zeros((num_samples*N*beam_size, 1, self.embedding_dim)),
+                                          active_paths_embedded], axis=1)[:, :-1]  # (S*N*B) * max(L) * E
+
+            # rnn_input = T.concatenate((T.repeat(z, beam_size, 0), x_pre_padded), axis=-1)  # (N*B) * max(L) * (dim(z)+E)
+
+            rnn_input = {self.rnn_in[0]: T.repeat(z, beam_size, 0),
+                         self.rnn_in[1]: x_pre_padded}
+
+            target_embeddings = get_output(self.rnn, rnn_input)[:, l].reshape((num_samples*N, beam_size,
+                                                                               self.embedding_dim))  # (S*N) * B * E
+
+            probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # (S*N) * B * D
+
+            probs = last_d_softmax(probs_denominators)  # (S*N) * B * D
+
+            scores = T.shape_padright(T.tile(best_scores_lm1, (num_samples, 1))) + T.log(probs) + \
+                     ((1./self.max_length) * T.shape_padright(log_p_z, 2))  # (S*N) * B * D
+            scores = T.mean(scores.reshape((num_samples, N, beam_size, self.vocab_size)), axis=0)  # N * B * D
 
             best_scores_l_all = T.max(scores, axis=1)  # N * D
 
