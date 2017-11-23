@@ -759,8 +759,8 @@ class SGVBWordsMulti(object):
         x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
         x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
 
-        z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0,
-                                                                            l_1, num_samples)  # (S*N) * dim(z) and N
+        z, kl = self.recognition_model.get_samples_and_kl_std_gaussian(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1,
+                                                                       num_samples)  # (S*N) * dim(z) and N
 
         if drop_mask_0 is None:
             x_0_embedded_dropped = x_0_embedded
@@ -895,8 +895,8 @@ class SGVBWordsMulti(object):
         x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])
         x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])
 
-        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0,
-                                                                           l_1, 1, means_only=True)  # N * dim(z)
+        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, 1,
+                                                                      means_only=True)  # N * dim(z)
 
         outputs = self.generate_outputs_z(z, beam_size, num_time_steps)
 
@@ -916,9 +916,9 @@ class SGVBWordsMulti(object):
         x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
         x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
-        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_from, x_from_embedded, x_to_best_guess,
-                                                                           x_to_best_guess_embedded, l_from, l_to, 1,
-                                                                           means_only=True)  # N * dim(z)
+        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_from, x_from_embedded, x_to_best_guess,
+                                                                      x_to_best_guess_embedded, l_from, l_to, 1,
+                                                                      means_only=True)  # N * dim(z)
 
         x_to = self.generative_models[l_to].beam_search(z, self.all_embeddings[l_to], beam_size, num_time_steps)
 
@@ -940,9 +940,9 @@ class SGVBWordsMulti(object):
         x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
         x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
-        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_from, x_from_embedded, x_to_best_guess,
-                                                                           x_to_best_guess_embedded, l_from, l_to,
-                                                                           num_samples)  # (S*N) * dim(z)
+        z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_from, x_from_embedded, x_to_best_guess,
+                                                                      x_to_best_guess_embedded, l_from, l_to,
+                                                                      num_samples)  # (S*N) * dim(z)
 
         x_to = self.generative_models[l_to].beam_search_samples(z, self.all_embeddings[l_to], beam_size, num_samples,
                                                                 num_time_steps)
