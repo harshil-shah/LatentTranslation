@@ -1,3 +1,4 @@
+from itertools import chain, combinations
 import numpy as np
 import theano.tensor as T
 from lasagne.layers import DenseLayer, get_all_layers, get_all_param_values, get_all_params, get_output, InputLayer, \
@@ -730,6 +731,130 @@ class RecRNNSplitForwardBackwardAttentionMultipleLatents(RecModel):
         set_all_param_values(get_all_layers(self.rnn), rnn_params_vals)
         set_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]), nn_params_vals)
         set_all_param_values(get_all_layers(self.attention_weights_nn), attention_weights_nn_params_vals)
+
+
+class RecRNNSplitForwardBackwardFinalMulti(object):
+
+    def __init__(self, z_dim, max_length, embedding_dim, dist_z, num_langs, nn_kwargs):
+
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.embedding_dim = embedding_dim
+
+        self.dist_z = dist_z()
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn_nn_depth = nn_kwargs['nn_depth']
+        self.nn_nn_hid_units = nn_kwargs['nn_hid_units']
+        self.nn_nn_hid_nonlinearity = nn_kwargs['nn_hid_nonlinearity']
+
+        self.rnns = {i: self.rnn_fn() for i in range(num_langs)}
+
+        self.nns = {i: self.nn_fn() for i in combinations(range(num_langs), 2)}
+
+    def rnn_fn(self):
+
+        l_in = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_mask = InputLayer((None, self.max_length))
+
+        l_out = LSTMLayer(l_in, num_units=self.nn_rnn_hid_units, mask_input=l_mask,
+                          nonlinearity=self.nn_rnn_hid_nonlinearity, only_return_final=True)
+
+        return l_out
+
+    def nn_fn(self):
+
+        l_in = InputLayer((None, 2 * self.nn_rnn_hid_units))
+
+        l_prev = l_in
+
+        for h in range(self.nn_nn_depth):
+
+            l_prev = DenseLayer(l_prev, num_units=self.nn_nn_hid_units, nonlinearity=self.nn_nn_hid_nonlinearity)
+
+        mean_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=linear)
+
+        cov_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=elu_plus_one)
+
+        return mean_nn, cov_nn
+
+    def get_hid(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1):
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        h_0 = self.rnns[lang_0].get_output_for([x_0_embedded, mask_0])  # N * dim(hid)
+
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+        h_1 = self.rnns[lang_1].get_output_for([x_1_embedded, mask_1])  # N * dim(hid)
+
+        h = T.concatenate([h_0, h_1], axis=-1)  # N * (2*dim(hid))
+
+        return h
+
+    def get_means_and_covs(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1):
+
+        h = self.get_hid(x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1)  # N * (2*dim(hid))
+
+        means = get_output(self.nns[(lang_0, lang_1)][0], h)  # N * dim(z)
+        covs = get_output(self.nns[(lang_0, lang_1)][1], h)  # N * dim(z)
+
+        return means, covs
+
+    def get_samples_and_kl_std_gaussian(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1, num_samples,
+                                        means_only=False):
+
+        if lang_0 < lang_1:
+            min_lang = lang_0
+            max_lang = lang_1
+            x_min_lang = x_0
+            x_min_lang_embedded = x_0_embedded
+            x_max_lang = x_1
+            x_max_lang_embedded = x_1_embedded
+        else:
+            min_lang = lang_1
+            max_lang = lang_0
+            x_min_lang = x_1
+            x_min_lang_embedded = x_1_embedded
+            x_max_lang = x_0
+            x_max_lang_embedded = x_0_embedded
+
+        means, covs = self.get_means_and_covs(x_min_lang, x_min_lang_embedded, x_max_lang, x_max_lang_embedded,
+                                              min_lang, max_lang)
+
+        if means_only:
+            samples = T.tile(means, [num_samples] + [1]*(means.ndim - 1))  # (S*N) * dim(z)
+        else:
+            samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        kl = -0.5 * T.sum(T.ones_like(means) + T.log(covs) - covs - (means**2), axis=range(1, means.ndim))
+
+        return samples, kl
+
+    def get_params(self):
+
+        rnn_params = get_all_params(get_all_layers(list(self.rnns.values())), trainable=True)
+        nn_params = get_all_params(get_all_layers(list(chain.from_iterable(self.nns.values()))), trainable=True)
+
+        return rnn_params + nn_params
+
+    def get_param_values(self):
+
+        rnn_params_vals = {l: get_all_param_values(get_all_layers(self.rnns[l])) for l in self.rnns.keys()}
+        nn_params_vals = {l: get_all_param_values(get_all_layers(self.nns[l])) for l in self.nns.keys()}
+
+        return [rnn_params_vals, nn_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_params_vals, nn_params_vals] = param_values
+
+        for l in self.rnns.keys():
+            set_all_param_values(get_all_layers(self.rnns[l]), rnn_params_vals[l])
+
+        for l in self.nns.keys():
+            set_all_param_values(get_all_layers(self.nns[l]), nn_params_vals[l])
 
 
 class RecModelSSL(object):
@@ -1537,3 +1662,179 @@ class RecRNNSplitForwardBackwardFinalTwoLatentsDependentSSL(object):
                                              self.cov_nn_0_only_z0]), nn_0_only_params_vals)
         set_all_param_values(get_all_layers([self.mean_nn_1_only_z1, self.cov_nn_1_only_z1, self.mean_nn_1_only_z0,
                                              self.cov_nn_1_only_z0]), nn_1_only_params_vals)
+
+
+class RecRNNSplitForwardBackwardFinalSSLMulti(object):
+
+    def __init__(self, z_dim, max_length, embedding_dim, dist_z, num_langs, nn_kwargs):
+
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.embedding_dim = embedding_dim
+
+        self.dist_z = dist_z()
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn_nn_depth = nn_kwargs['nn_depth']
+        self.nn_nn_hid_units = nn_kwargs['nn_hid_units']
+        self.nn_nn_hid_nonlinearity = nn_kwargs['nn_hid_nonlinearity']
+
+        self.rnns = {i: self.rnn_fn() for i in range(num_langs)}
+
+        self.only_nns = {i: self.nn_fn_single_only() for i in range(num_langs)}
+
+        self.both_nns = {i: self.nn_fn_both() for i in combinations(range(num_langs), 2)}
+
+    def rnn_fn(self):
+
+        l_in = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_mask = InputLayer((None, self.max_length))
+
+        l_out = LSTMLayer(l_in, num_units=self.nn_rnn_hid_units, mask_input=l_mask,
+                          nonlinearity=self.nn_rnn_hid_nonlinearity, only_return_final=True)
+
+        return l_out
+
+    def nn_fn_single_only(self):
+
+        l_in = InputLayer((None, self.nn_rnn_hid_units))
+
+        l_prev = l_in
+
+        for h in range(self.nn_nn_depth):
+
+            l_prev = DenseLayer(l_prev, num_units=self.nn_nn_hid_units, nonlinearity=self.nn_nn_hid_nonlinearity)
+
+        mean_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=linear)
+
+        cov_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=elu_plus_one)
+
+        return mean_nn, cov_nn
+
+    def nn_fn_both(self):
+
+        l_in = InputLayer((None, 2 * self.nn_rnn_hid_units))
+
+        l_prev = l_in
+
+        for h in range(self.nn_nn_depth):
+
+            l_prev = DenseLayer(l_prev, num_units=self.nn_nn_hid_units, nonlinearity=self.nn_nn_hid_nonlinearity)
+
+        mean_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=linear)
+
+        cov_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=elu_plus_one)
+
+        return mean_nn, cov_nn
+
+    def get_hid_only(self, x, x_embedded, lang):
+
+        mask = T.ge(x, 0)  # N * max(L)
+
+        h = self.rnns[lang].get_output_for([x_embedded, mask])  # N * dim(hid)
+
+        return h
+
+    def get_hid_both(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1):
+
+        h_0 = self.get_hid_only(x_0, x_0_embedded, lang_0)  # N * dim(hid)
+        h_1 = self.get_hid_only(x_1, x_1_embedded, lang_1)  # N * dim(hid)
+
+        h = T.concatenate([h_0, h_1], axis=-1)  # N * (2*dim(hid))
+
+        return h
+
+    def get_means_and_covs_only(self, x, x_embedded, lang):
+
+        h = self.get_hid_only(x, x_embedded, lang)  # N * dim(hid)
+
+        means = get_output(self.only_nns[lang][0], h)  # N * dim(z)
+        covs = get_output(self.only_nns[lang][1], h)  # N * dim(z)
+
+        return means, covs
+
+    def get_means_and_covs_both(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1):
+
+        h = self.get_hid_both(x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1)  # N * (2*dim(hid))
+
+        means = get_output(self.both_nns[(lang_0, lang_1)][0], h)  # N * dim(z)
+        covs = get_output(self.both_nns[(lang_0, lang_1)][1], h)  # N * dim(z)
+
+        return means, covs
+
+    def get_samples_and_kl_std_gaussian_only(self, x, x_embedded, lang, num_samples, means_only=False):
+
+        means, covs = self.get_means_and_covs_only(x, x_embedded, lang)
+
+        if means_only:
+            samples = T.tile(means, [num_samples] + [1]*(means.ndim - 1))  # (S*N) * dim(z)
+        else:
+            samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        kl = -0.5 * T.sum(T.ones_like(means) + T.log(covs) - covs - (means**2), axis=range(1, means.ndim))
+
+        return samples, kl
+
+    def get_samples_and_kl_std_gaussian_both(self, x_0, x_0_embedded, x_1, x_1_embedded, lang_0, lang_1, num_samples,
+                                             means_only=False):
+
+        if lang_0 < lang_1:
+            min_lang = lang_0
+            max_lang = lang_1
+            x_min_lang = x_0
+            x_min_lang_embedded = x_0_embedded
+            x_max_lang = x_1
+            x_max_lang_embedded = x_1_embedded
+        else:
+            min_lang = lang_1
+            max_lang = lang_0
+            x_min_lang = x_1
+            x_min_lang_embedded = x_1_embedded
+            x_max_lang = x_0
+            x_max_lang_embedded = x_0_embedded
+
+        means, covs = self.get_means_and_covs_both(x_min_lang, x_min_lang_embedded, x_max_lang, x_max_lang_embedded,
+                                                   min_lang, max_lang)
+
+        if means_only:
+            samples = T.tile(means, [num_samples] + [1]*(means.ndim - 1))  # (S*N) * dim(z)
+        else:
+            samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        kl = -0.5 * T.sum(T.ones_like(means) + T.log(covs) - covs - (means**2), axis=range(1, means.ndim))
+
+        return samples, kl
+
+    def get_params(self):
+
+        rnn_params = get_all_params(get_all_layers(list(self.rnns.values())), trainable=True)
+        only_nn_params = get_all_params(get_all_layers(list(chain.from_iterable(self.only_nns.values()))),
+                                        trainable=True)
+        both_nn_params = get_all_params(get_all_layers(list(chain.from_iterable(self.both_nns.values()))),
+                                        trainable=True)
+
+        return rnn_params + only_nn_params + both_nn_params
+
+    def get_param_values(self):
+
+        rnn_params_vals = {l: get_all_param_values(get_all_layers(self.rnns[l])) for l in self.rnns.keys()}
+        only_nn_params_vals = {l: get_all_param_values(get_all_layers(self.only_nns[l])) for l in self.only_nns.keys()}
+        both_nn_params_vals = {l: get_all_param_values(get_all_layers(self.both_nns[l])) for l in self.both_nns.keys()}
+
+        return [rnn_params_vals, only_nn_params_vals, both_nn_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_params_vals, only_nn_params_vals, both_nn_params_vals] = param_values
+
+        for l in self.rnns.keys():
+            set_all_param_values(get_all_layers(self.rnns[l]), rnn_params_vals[l])
+
+        for l in self.only_nns.keys():
+            set_all_param_values(get_all_layers(self.only_nns[l]), only_nn_params_vals[l])
+
+        for l in self.both_nns.keys():
+            set_all_param_values(get_all_layers(self.both_nns[l]), both_nn_params_vals[l])
