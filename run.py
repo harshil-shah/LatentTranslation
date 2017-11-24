@@ -2292,3 +2292,263 @@ class RunWordsSSLMulti(object):
 
             for key, value in out.items():
                 np.save(os.path.join(self.out_dir, key + '.npy'), value)
+
+
+class RunEncDec(object):
+
+    def __init__(self, solver, solver_kwargs, l_0, l_1, valid_vocab_0, valid_vocab_1, main_dir, out_dir, dataset,
+                 load_param_dir=None, pre_trained=False):
+
+        self.l_0 = l_0
+        self.l_1 = l_1
+
+        self.valid_vocab_0 = valid_vocab_0
+        self.valid_vocab_1 = valid_vocab_1
+
+        self.main_dir = main_dir
+        self.out_dir = out_dir
+        self.load_param_dir = load_param_dir
+
+        self.solver_kwargs = solver_kwargs
+
+        self.max_length = solver_kwargs['max_length']
+        self.vocab_size = solver_kwargs['vocab_size']
+
+        print('loading data')
+
+        start = time.clock()
+
+        self.x_0_train, self.x_1_train, self.x_0_test, self.x_1_test, self.L_0_train, self.L_1_train, self.L_0_test, \
+            self.L_1_test = self.load_data(dataset)
+
+        print('data loaded; time taken = ' + str(time.clock() - start) + ' seconds')
+
+        print('num sentences train = ' + str(len(self.L_0_train)))
+        print('num sentences test = ' + str(len(self.L_0_test)))
+
+        self.solver = solver(**self.solver_kwargs)
+
+        self.pre_trained = pre_trained
+
+        if self.pre_trained:
+
+            with open(os.path.join(self.load_param_dir, 'all_embeddings_0.save'), 'rb') as f:
+                self.solver.all_embeddings_0.set_value(cPickle.load(f))
+
+            with open(os.path.join(self.load_param_dir, 'all_embeddings_1.save'), 'rb') as f:
+                self.solver.all_embeddings_1.set_value(cPickle.load(f))
+
+            with open(os.path.join(self.load_param_dir, 'decoder_params.save'), 'rb') as f:
+                self.solver.deocder.set_param_values(cPickle.load(f))
+
+            with open(os.path.join(self.load_param_dir, 'encoder_params.save'), 'rb') as f:
+                self.solver.encoder.set_param_values(cPickle.load(f))
+
+    def load_words(self, folder, files, load_batch_size):
+
+        words = []
+
+        for f in files:
+            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
+                words += json.loads(s.read())
+
+        L = np.array([len(w) for w in words])
+
+        max_L = max(L)
+
+        word_arrays = []
+
+        start = time.clock()
+
+        batches_loaded = 0
+
+        for i in range(0, len(L), load_batch_size):
+
+            L_i = L[i: i+load_batch_size]
+
+            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
+            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max_L)] = \
+                np.concatenate(words[i: i+load_batch_size])
+
+            word_arrays.append(word_array)
+
+            batches_loaded += 1
+
+            print(str(batches_loaded) + ' batches loaded (time taken = ' + str(time.clock() - start) +
+                  ' seconds)')
+
+        del words
+
+        return np.concatenate(word_arrays), L
+
+    def load_data(self, dataset, load_batch_size=500000):
+
+        folder = '../_datasets/' + dataset
+
+        files_0_train = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_0)
+                                and not f.endswith('test.txt')
+                                and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        files_1_train = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_1)
+                                and not f.endswith('test.txt')
+                                and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        files_0_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_0)
+                               and f.endswith('test.txt') and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        files_1_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_1)
+                               and f.endswith('test.txt') and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        x_0_train, L_0_train = self.load_words(folder, files_0_train, load_batch_size)
+        x_1_train, L_1_train = self.load_words(folder, files_1_train, load_batch_size)
+        x_0_test, L_0_test = self.load_words(folder, files_0_test, load_batch_size)
+        x_1_test, L_1_test = self.load_words(folder, files_1_test, load_batch_size)
+
+        return x_0_train, x_1_train, x_0_test, x_1_test, L_0_train, L_1_train, L_0_test, L_1_test
+
+    def get_translation_fn(self, beam_size):
+
+        return self.solver.translate_fn(beam_size)
+
+    def call_translation_fn(self, translation_fn, x_in, x_out_true):
+
+        guess = translation_fn(x_in)
+
+        out = OrderedDict()
+
+        out['true_x_from_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = x_in
+        out['true_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = x_out_true
+        out['gen_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = guess
+
+        return out
+
+    def print_translations(self, translations):
+
+        x_in = translations['true_x_from_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
+        x_out_true = translations['true_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
+        x_out_gen = translations['gen_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
+
+        print('='*10)
+        print('translations ' + self.l_0 + ' to ' + self.l_1)
+        print('='*10)
+
+        for n in range(x_in.shape[0]):
+
+            print('  in: ' + ' '.join([self.valid_vocab_0[j] for j in x_in[n] if j >= 0]))
+            print('true: ' + ' '.join([self.valid_vocab_1[j] for j in x_out_true[n] if j >= 0]))
+            print(' gen: ' + ' '.join([self.valid_vocab_1[j] for j in x_out_gen[n] if j >= 0]))
+
+            print('-'*10)
+
+        print('='*10)
+
+    def train(self, n_iter, batch_size, word_drop=None, grad_norm_constraint=None, update=adam, update_kwargs=None,
+              val_freq=None, val_batch_size=0, val_print_gen=5, val_beam_size=15, save_params_every=None):
+
+        if self.pre_trained:
+            with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
+                saved_update = cPickle.load(f)
+            np.random.seed()
+        else:
+            saved_update = None
+
+        optimiser, updates = self.solver.optimiser(grad_norm_constraint=grad_norm_constraint, update=update,
+                                                   update_kwargs=update_kwargs, saved_update=saved_update)
+
+        log_p_x_fn = self.solver.log_p_x_fn()
+
+        translation_fn = self.get_translation_fn(val_beam_size)
+
+        for i in range(n_iter):
+
+            start = time.clock()
+
+            batch_indices = np.random.choice(len(self.x_0_train), batch_size)
+            batch_0 = self.x_0_train[batch_indices]
+            batch_1 = self.x_1_train[batch_indices]
+
+            if word_drop is not None:
+
+                L_1 = self.L_1_train[batch_indices]
+
+                drop_indices_1 = np.array([np.random.permutation(np.arange(j))[:int(np.floor(word_drop * j))]
+                                           for j in L_1])
+
+                drop_mask_1 = np.ones_like(batch_1, dtype='float32')
+
+                for n in range(len(drop_indices_1)):
+                    drop_mask_1[n][drop_indices_1[n]] = 0.
+
+            else:
+
+                drop_mask_1 = np.ones_like(batch_1, dtype='float32')
+
+            log_p_x = optimiser(batch_0, batch_1, drop_mask_1)
+
+            print('Iteration ' + str(i + 1) + ': log p x = ' + str(log_p_x) + ' per data point (time taken = ' +
+                  str(time.clock() - start) + ' seconds)')
+
+            if val_freq is not None and i % val_freq == 0:
+
+                val_batch_indices = np.random.choice(len(self.x_0_test), val_batch_size)
+                val_batch_l_0 = self.x_0_test[val_batch_indices]
+                val_batch_l_1 = self.x_1_test[val_batch_indices]
+
+                val_log_p_x = log_p_x_fn(val_batch_l_0, val_batch_l_1)
+
+                print('Test set log p x = ' + str(val_log_p_x) + ' per data point')
+
+                translation_batch_indices = np.random.choice(len(self.x_0_test), val_print_gen)
+                translation_batch_l_0 = self.x_0_test[translation_batch_indices]
+                translation_batch_l_1 = self.x_1_test[translation_batch_indices]
+
+                translations = self.call_translation_fn(translation_fn, translation_batch_l_0, translation_batch_l_1)
+
+                self.print_translations(translations)
+
+            if save_params_every is not None and i % save_params_every == 0 and i > 0:
+
+                with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
+                    cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+                with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
+                    cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+                with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
+                    cPickle.dump(self.solver.decoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+                with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
+                    cPickle.dump(self.solver.encoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+                with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+                    cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
+            cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
+            cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
+            cPickle.dump(self.solver.decoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
+            cPickle.dump(self.solver.encoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+            cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+    def translate(self, num_outputs, beam_size=15):
+
+        np.random.seed(1234)
+
+        batch_indices = np.random.choice(len(self.x_0_test), num_outputs)
+        batch_0 = self.x_0_test[batch_indices]
+        batch_1 = self.x_1_test[batch_indices]
+
+        translation_fn = self.get_translation_fn(beam_size)
+
+        translations = self.call_translation_fn(translation_fn, batch_0, batch_1)
+
+        for key, value in translations.items():
+            np.save(os.path.join(self.out_dir, key + '.npy'), value)
