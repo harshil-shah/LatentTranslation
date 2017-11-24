@@ -145,18 +145,21 @@ class RNNSearchDecoder(object):
 
     def get_params(self):
 
+        alignment_nn_params = get_all_params(get_all_layers(self.alignment_nn), trainable=True)
         nn_params = get_all_params(get_all_layers(self.nn), trainable=True)
 
-        return nn_params
+        return alignment_nn_params + nn_params
 
     def get_param_values(self):
 
+        alignment_nn_params_vals = get_all_param_values(get_all_layers(self.alignment_nn))
         nn_params_vals = get_all_param_values(get_all_layers(self.nn))
 
-        return [nn_params_vals]
+        return [alignment_nn_params_vals, nn_params_vals]
 
     def set_param_values(self, param_values):
 
-        [nn_params_vals] = param_values
+        [alignment_nn_params_vals, nn_params_vals] = param_values
 
+        set_all_param_values(get_all_layers(self.alignment_nn), alignment_nn_params_vals)
         set_all_param_values(get_all_layers(self.nn), nn_params_vals)
