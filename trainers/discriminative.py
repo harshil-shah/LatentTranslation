@@ -4,7 +4,7 @@ import theano.tensor as T
 from lasagne.updates import norm_constraint
 
 
-class EncoderDecoderTrainer(object):
+class DiscriminativeTrainer(object):
 
     def __init__(self, encoder, decoder, h_dim, max_length, vocab_size, embedding_dim, encoder_nn_kwargs,
                  decoder_nn_kwargs, eos_ind):

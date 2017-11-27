@@ -3,7 +3,7 @@ import numpy as np
 import theano.tensor as T
 from lasagne.layers import DenseLayer, get_all_layers, get_all_param_values, get_all_params, get_output, InputLayer, \
     LSTMLayer, set_all_param_values
-from nn.layers import LSTMLayer0Mask
+from nn.layers import LSTMLayer0Mask, LSTMLayerGaussianSampling
 from lasagne.nonlinearities import linear
 from nn.nonlinearities import elu_plus_one
 from .utilities import last_d_softmax
@@ -1838,3 +1838,213 @@ class RecRNNSplitForwardBackwardFinalSSLMulti(object):
 
         for l in self.both_nns.keys():
             set_all_param_values(get_all_layers(self.both_nns[l]), both_nn_params_vals[l])
+
+
+class RecRNNSearchSSLMulti(object):
+
+    def __init__(self, z_dim, max_length, embedding_dim, dist_z, num_langs, nn_kwargs):
+
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.embedding_dim = embedding_dim
+
+        self.dist_z = dist_z()
+
+        self.rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.only_nns_forward = {i: self.rnn_fn(backwards=False, both=False) for i in range(num_langs)}
+        self.only_nns_backward = {i: self.rnn_fn(backwards=True, both=False) for i in range(num_langs)}
+
+        self.both_nns_forward = {i: self.rnn_fn(backwards=False, both=True) for i in combinations(range(num_langs), 2)}
+        self.both_nns_backward = {i: self.rnn_fn(backwards=True, both=True) for i in combinations(range(num_langs), 2)}
+
+        self.param_dicts = [self.only_nns_forward, self.only_nns_backward, self.both_nns_forward,
+                            self.both_nns_backward]
+
+    def rnn_fn(self, backwards, both):
+
+        input_dim = 2 * self.embedding_dim if both else self.embedding_dim
+
+        l_in = InputLayer((None, self.max_length, input_dim))
+
+        # l_mask = InputLayer((None, self.max_length))
+
+        l_out = LSTMLayerGaussianSampling(l_in, num_units=int(self.z_dim/2),  # mask_input=l_mask,
+                                          nonlinearity=self.rnn_hid_nonlinearity, backwards=backwards,)
+
+        return l_out
+
+    def get_samples_only(self, x, x_embedded, l, num_samples, means_only=False):
+
+        mask = T.ge(x, 0)  # N * max(L)
+
+        x_embedded_rep = T.tile(x_embedded, (num_samples, 1, 1))  # (S*N) * max(L) * E
+        mask_rep = T.tile(mask, (num_samples, 1))  # (S*N) * max(L)
+
+        z_forward, means_forward, covs_forward = self.only_nns_forward[l].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z_backward, means_backward, covs_backward = self.only_nns_backward[l].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        return z_forward, z_backward, means_forward, covs_forward, means_backward, covs_backward
+
+    def get_samples_and_kl_std_gaussian_only(self, x, x_embedded, l, num_samples, means_only=False):
+
+        mask = T.ge(x, 0)  # N * max(L)
+
+        x_embedded_rep = T.tile(x_embedded, (num_samples, 1, 1))  # (S*N) * max(L) * E
+        mask_rep = T.tile(mask, (num_samples, 1))  # (S*N) * max(L)
+
+        z_forward, means_forward, covs_forward = self.only_nns_forward[l].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z_backward, means_backward, covs_backward = self.only_nns_backward[l].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z = T.concatenate((z_forward, z_backward), axis=-1)
+
+        means = T.concatenate((means_forward, means_backward), axis=-1)
+        covs = T.concatenate((covs_forward, covs_backward), axis=-1)
+
+        kl = -0.5 * T.sum(T.ones_like(means) + T.log(covs) - covs - (means**2), axis=range(1, means.ndim))
+
+        return z, kl
+
+    def get_samples_both(self, x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, num_samples, means_only=False):
+
+        if l_0 < l_1:
+            min_l = l_0
+            max_l = l_1
+            x_min_l = x_0
+            x_min_l_embedded = x_0_embedded
+            x_max_l = x_1
+            x_max_l_embedded = x_1_embedded
+        else:
+            min_l = l_1
+            max_l = l_0
+            x_min_l = x_1
+            x_min_l_embedded = x_1_embedded
+            x_max_l = x_0
+            x_max_l_embedded = x_0_embedded
+
+        mask_min_l = T.ge(x_min_l, 0)  # N * max(L)
+        mask_max_l = T.ge(x_max_l, 0)  # N * max(L)
+
+        mask = T.maximum(mask_min_l, mask_max_l)  # N * max(L)
+
+        x_embedded = T.concatenate((x_min_l_embedded, x_max_l_embedded), axis=-1)  # N * max(L) * (2*E)
+
+        x_embedded_rep = T.tile(x_embedded, (num_samples, 1, 1))
+        mask_rep = T.tile(mask, (num_samples, 1))
+
+        z_forward, means_forward, covs_forward = self.both_nns_forward[(min_l, max_l)].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z_backward, means_backward, covs_backward = self.both_nns_backward[(min_l, max_l)].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        return z_forward, z_backward, means_forward, covs_forward, means_backward, covs_backward
+
+    def get_samples_and_kl_std_gaussian_both(self, x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, num_samples, means_only=False):
+
+        if l_0 < l_1:
+            min_l = l_0
+            max_l = l_1
+            x_min_l = x_0
+            x_min_l_embedded = x_0_embedded
+            x_max_l = x_1
+            x_max_l_embedded = x_1_embedded
+        else:
+            min_l = l_1
+            max_l = l_0
+            x_min_l = x_1
+            x_min_l_embedded = x_1_embedded
+            x_max_l = x_0
+            x_max_l_embedded = x_0_embedded
+
+        mask_min_l = T.ge(x_min_l, 0)  # N * max(L)
+        mask_max_l = T.ge(x_max_l, 0)  # N * max(L)
+
+        mask = T.maximum(mask_min_l, mask_max_l)  # N * max(L)
+
+        x_embedded = T.concatenate((x_min_l_embedded, x_max_l_embedded), axis=-1)  # N * max(L) * (2*E)
+
+        x_embedded_rep = T.tile(x_embedded, (num_samples, 1, 1))
+        mask_rep = T.tile(mask, (num_samples, 1))
+
+        z_forward, means_forward, covs_forward = self.both_nns_forward[(min_l, max_l)].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z_backward, means_backward, covs_backward = self.both_nns_backward[(min_l, max_l)].get_output_for(
+            [x_embedded_rep], means_only=means_only
+        )
+
+        z = T.concatenate((z_forward, z_backward), axis=-1)
+
+        means = T.concatenate((means_forward, means_backward), axis=-1)
+        covs = T.concatenate((covs_forward, covs_backward), axis=-1)
+
+        kl = -0.5 * T.sum(T.ones_like(means) + T.log(covs) - covs - (means**2), axis=range(1, means.ndim))
+
+        return z, kl
+
+    # def get_params(self):
+    #
+    #     params = list(chain.from_iterable(
+    #         [get_all_params(list(self.param_dicts[i].values()), trainable=True)
+    #          for i in range(len(self.param_dicts))]
+    #     ))
+    #
+    #     return params
+    #
+    # def get_param_values(self):
+    #
+    #     param_values = [
+    #         {l: get_all_param_values(self.param_dicts[i][l]) for l in self.param_dicts[i].keys()}
+    #         for i in range(len(self.param_dicts))
+    #     ]
+    #
+    #     return param_values
+    #
+    # def set_param_values(self, param_values):
+    #
+    #     for i in range(len(self.param_dicts)):
+    #
+    #         for l in self.param_dicts[i].keys():
+    #             set_all_param_values(self.param_dicts[i][l], param_values[i][l])
+
+    def get_params(self):
+
+        params = list(chain.from_iterable(
+            nn.params for i in range(len(self.param_dicts)) for nn in self.param_dicts[i].values()
+        ))
+
+        return params
+
+    def get_param_values(self):
+
+        params = [{
+            l: [p.get_value() for p in self.param_dicts[i][l].params]
+            for l in self.param_dicts[i].keys()
+        } for i in range(len(self.param_dicts))]
+
+        return params
+
+    def set_param_values(self, param_values):
+
+        for i in range(len(self.param_dicts)):
+
+            for l in self.param_dicts[i].keys():
+
+                for p in range(len(self.param_dicts[i][l].params)):
+
+                    self.param_dicts[i][l].params[p].set_value(param_values[i][l][p])

@@ -1774,36 +1774,36 @@ class RunWordsSSLMulti(object):
 
         return x_only, x_both, x_test, L_only, L_both, L_test
 
-    def call_generate_output_prior(self, generate_output_prior):
-
-        outputs = generate_output_prior()
-
-        out = OrderedDict()
-
-        for l in range(self.num_langs):
-
-            out['generated_x_' + self.langs[l] + '_beam_prior'] = outputs[l]
-
-        return out
-
-    def print_output_prior(self, output_prior):
-
-        print('='*10)
-        print('samples')
-        print('='*10)
-
-        for n in range(output_prior['generated_x_' + self.langs[0] + '_beam_prior'].shape[0]):
-
-            for l in range(self.num_langs):
-
-                x_l = output_prior['generated_x_' + self.langs[l] + '_beam_prior']
-
-                print('gen x_' + self.langs[l] + ': ' + ' '.join([self.valid_vocabs[l][int(i)] for i in x_l[n]
-                                                                  if i >= 0]))
-
-            print('-'*10)
-
-        print('='*10)
+    # def call_generate_output_prior(self, generate_output_prior):
+    #
+    #     outputs = generate_output_prior()
+    #
+    #     out = OrderedDict()
+    #
+    #     for l in range(self.num_langs):
+    #
+    #         out['generated_x_' + self.langs[l] + '_beam_prior'] = outputs[l]
+    #
+    #     return out
+    #
+    # def print_output_prior(self, output_prior):
+    #
+    #     print('='*10)
+    #     print('samples')
+    #     print('='*10)
+    #
+    #     for n in range(output_prior['generated_x_' + self.langs[0] + '_beam_prior'].shape[0]):
+    #
+    #         for l in range(self.num_langs):
+    #
+    #             x_l = output_prior['generated_x_' + self.langs[l] + '_beam_prior']
+    #
+    #             print('gen x_' + self.langs[l] + ': ' + ' '.join([self.valid_vocabs[l][int(i)] for i in x_l[n]
+    #                                                               if i >= 0]))
+    #
+    #         print('-'*10)
+    #
+    #     print('='*10)
 
     def call_generate_output_posterior_only(self, generate_output_posterior, x, l_in):
 
@@ -1953,7 +1953,7 @@ class RunWordsSSLMulti(object):
 
         elbo_fns = {l: self.vb.elbo_fn(l[0], l[1], val_num_samples) for l in combinations(range(self.num_langs), 2)}
 
-        generate_output_prior_fn = self.vb.generate_output_prior_fn(val_print_gen, val_beam_size)
+        # generate_output_prior_fn = self.vb.generate_output_prior_fn(val_print_gen, val_beam_size)
         generate_output_posterior_only_fns = {l: self.vb.generate_output_posterior_fn_only(l, val_beam_size)
                                               for l in range(self.num_langs)}
         generate_output_posterior_both_fns = {l: self.vb.generate_output_posterior_fn_both(l[0], l[1], val_beam_size)
@@ -2049,9 +2049,9 @@ class RunWordsSSLMulti(object):
                     print('Test set ELBO ' + self.langs[l[0]] + ' and ' + self.langs[l[1]] + ' = ' + str(val_elbo_l) +
                           ' (KL (both) = ' + str(val_kl_both_l) + ') per data point')
 
-                output_prior = self.call_generate_output_prior(generate_output_prior_fn)
-
-                self.print_output_prior(output_prior)
+                # output_prior = self.call_generate_output_prior(generate_output_prior_fn)
+                #
+                # self.print_output_prior(output_prior)
 
                 post_batches_only = {}
                 post_batches_both = {}
@@ -2189,14 +2189,14 @@ class RunWordsSSLMulti(object):
 
     def generate_output(self, prior, posterior, num_outputs, beam_size=15):
 
-        if prior:
-
-            generate_output_prior = self.vb.generate_output_prior_fn(num_outputs, beam_size)
-
-            output_prior = self.call_generate_output_prior(generate_output_prior)
-
-            for key, value in output_prior.items():
-                np.save(os.path.join(self.out_dir, key + '.npy'), value)
+        # if prior:
+        #
+        #     generate_output_prior = self.vb.generate_output_prior_fn(num_outputs, beam_size)
+        #
+        #     output_prior = self.call_generate_output_prior(generate_output_prior)
+        #
+        #     for key, value in output_prior.items():
+        #         np.save(os.path.join(self.out_dir, key + '.npy'), value)
 
         if posterior:
 
@@ -2294,7 +2294,7 @@ class RunWordsSSLMulti(object):
                 np.save(os.path.join(self.out_dir, key + '.npy'), value)
 
 
-class RunEncDec(object):
+class RunDiscriminative(object):
 
     def __init__(self, solver, solver_kwargs, l_0, l_1, valid_vocab_0, valid_vocab_1, main_dir, out_dir, dataset,
                  load_param_dir=None, pre_trained=False):

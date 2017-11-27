@@ -39,7 +39,7 @@ class RNNSearchDecoder(object):
         l_in_enc_h = InputLayer((None, self.max_length, self.enc_h_dim))
 
         l_rnn = RNNSearchLayer(l_in_x, l_in_enc_h, self.nn_rnn_hid_units, max_length=self.max_length,
-                               alignment_nn=self.alignment_nn, nonlinearity=self.nn_rnn_hid_nonlinearity)
+                               nonlinearity=self.nn_rnn_hid_nonlinearity)
 
         l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
 
@@ -145,21 +145,18 @@ class RNNSearchDecoder(object):
 
     def get_params(self):
 
-        alignment_nn_params = get_all_params(get_all_layers(self.alignment_nn), trainable=True)
         nn_params = get_all_params(get_all_layers(self.nn), trainable=True)
 
-        return alignment_nn_params + nn_params
+        return nn_params
 
     def get_param_values(self):
 
-        alignment_nn_params_vals = get_all_param_values(get_all_layers(self.alignment_nn))
         nn_params_vals = get_all_param_values(get_all_layers(self.nn))
 
-        return [alignment_nn_params_vals, nn_params_vals]
+        return [nn_params_vals]
 
     def set_param_values(self, param_values):
 
-        [alignment_nn_params_vals, nn_params_vals] = param_values
+        [nn_params_vals] = param_values
 
-        set_all_param_values(get_all_layers(self.alignment_nn), alignment_nn_params_vals)
         set_all_param_values(get_all_layers(self.nn), nn_params_vals)
