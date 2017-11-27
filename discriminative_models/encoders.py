@@ -5,9 +5,9 @@ from nn.layers import LSTMLayer0Mask
 
 class Encoder(object):
 
-    def __init__(self, h_dim, max_length, embedding_dim):
+    def __init__(self, z_dim, max_length, embedding_dim):
 
-        self.h_dim = h_dim
+        self.z_dim = z_dim
 
         self.max_length = max_length
 
@@ -26,11 +26,11 @@ class Encoder(object):
 
 class RNNSearchEncoder(Encoder):
 
-    def __init__(self, h_dim, max_length, embedding_dim, nn_kwargs):
+    def __init__(self, z_dim, max_length, embedding_dim, nn_kwargs):
 
         self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
 
-        super().__init__(h_dim, max_length, embedding_dim)
+        super().__init__(z_dim, max_length, embedding_dim)
 
     def nn_fn(self):
 
@@ -38,23 +38,23 @@ class RNNSearchEncoder(Encoder):
 
         l_mask = InputLayer((None, self.max_length))
 
-        l_forward = LSTMLayer0Mask(l_in, num_units=int(self.h_dim/2), mask_input=l_mask,
+        l_forward = LSTMLayer0Mask(l_in, num_units=int(self.z_dim / 2), mask_input=l_mask,
                                    nonlinearity=self.nn_rnn_hid_nonlinearity)
 
-        l_backward = LSTMLayer0Mask(l_in, num_units=int(self.h_dim/2), mask_input=l_mask,
+        l_backward = LSTMLayer0Mask(l_in, num_units=int(self.z_dim / 2), mask_input=l_mask,
                                     nonlinearity=self.nn_rnn_hid_nonlinearity, backwards=True)
 
         return [l_forward, l_backward]
 
-    def get_hid(self, x, x_embedded):
+    def get_z(self, x, x_embedded):
 
         mask = T.ge(x, 0)  # N * max(L)
 
-        h_forward = self.nn[0].get_output_for([x_embedded, mask])  # N * dim(hid)
-        h_backward = self.nn[1].get_output_for([x_embedded, mask])  # N * dim(hid)
-        h = T.concatenate([h_forward, h_backward], axis=-1)  # N * (2*dim(hid))
+        z_forward = self.nn[0].get_output_for([x_embedded, mask])  # N * dim(hid)
+        z_backward = self.nn[1].get_output_for([x_embedded, mask])  # N * dim(hid)
+        z = T.concatenate([z_forward, z_backward], axis=-1)  # N * (2*dim(hid))
 
-        return h
+        return z
 
     def get_params(self):
 

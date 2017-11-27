@@ -6,10 +6,10 @@ from lasagne.updates import norm_constraint
 
 class DiscriminativeTrainer(object):
 
-    def __init__(self, encoder, decoder, h_dim, max_length, vocab_size, embedding_dim, encoder_nn_kwargs,
+    def __init__(self, encoder, decoder, z_dim, max_length, vocab_size, embedding_dim, encoder_nn_kwargs,
                  decoder_nn_kwargs, eos_ind):
 
-        self.h_dim = h_dim
+        self.z_dim = z_dim
         self.max_length = max_length
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
@@ -36,11 +36,11 @@ class DiscriminativeTrainer(object):
 
     def init_encoder(self, encoder):
 
-        return encoder(self.h_dim, self.max_length, self.embedding_dim, self.encoder_nn_kwargs)
+        return encoder(self.z_dim, self.max_length, self.embedding_dim, self.encoder_nn_kwargs)
 
     def init_decoder(self, decoder):
 
-        return decoder(self.h_dim, self.max_length, self.embedding_dim, self.embedder, self.decoder_nn_kwargs)
+        return decoder(self.z_dim, self.max_length, self.embedding_dim, self.embedder, self.decoder_nn_kwargs)
 
     def cut_off(self, x, eos_ind):
 
@@ -68,9 +68,9 @@ class DiscriminativeTrainer(object):
         else:
             x_1_embedded_dropped = x_1_embedded * T.shape_padright(drop_mask_1)
 
-        h = self.encoder.get_hid(x_0, x_0_embedded)
+        z = self.encoder.get_z(x_0, x_0_embedded)
 
-        log_p_x_1 = self.decoder.log_p_x(x_1, x_1_embedded, x_1_embedded_dropped, h, self.all_embeddings_1)
+        log_p_x_1 = self.decoder.log_p_x(x_1, x_1_embedded, x_1_embedded_dropped, z, self.all_embeddings_1)
 
         return T.mean(log_p_x_1)
 
@@ -126,9 +126,9 @@ class DiscriminativeTrainer(object):
 
         x_0_embedded = self.embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
 
-        h = self.encoder.get_hid(x_0, x_0_embedded)
+        z = self.encoder.get_z(x_0, x_0_embedded)
 
-        x_1 = self.decoder.beam_search(h, self.all_embeddings_1, beam_size)
+        x_1 = self.decoder.beam_search(z, self.all_embeddings_1, beam_size)
 
         x_1 = self.cut_off(x_1, self.eos_ind)
 

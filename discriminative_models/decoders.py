@@ -9,9 +9,9 @@ from model.utilities import last_d_softmax
 
 class RNNSearchDecoder(object):
 
-    def __init__(self, enc_h_dim, max_length, embedding_dim, embedder, nn_kwargs):
+    def __init__(self, z_dim, max_length, embedding_dim, embedder, nn_kwargs):
 
-        self.enc_h_dim = enc_h_dim
+        self.z_dim = z_dim
         self.max_length = max_length
         self.embedding_dim = embedding_dim
 
@@ -26,16 +26,16 @@ class RNNSearchDecoder(object):
 
         l_in_x = InputLayer((None, self.max_length, self.embedding_dim))
 
-        l_in_enc_h = InputLayer((None, self.max_length, self.enc_h_dim))
+        l_in_z = InputLayer((None, self.max_length, self.z_dim))
 
-        l_rnn = RNNSearchLayer(l_in_x, l_in_enc_h, self.nn_rnn_hid_units, max_length=self.max_length,
+        l_rnn = RNNSearchLayer(l_in_x, l_in_z, self.nn_rnn_hid_units, max_length=self.max_length,
                                nonlinearity=self.nn_rnn_hid_nonlinearity)
 
         l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
 
-        return (l_in_x, l_in_enc_h), l_out
+        return (l_in_x, l_in_z), l_out
 
-    def get_probs(self, x_embedded, x_embedded_dropped, enc_h, all_embeddings, mode='all'):
+    def get_probs(self, x_embedded, x_embedded_dropped, z, all_embeddings, mode='all'):
 
         N = x_embedded.shape[0]
 
@@ -43,7 +43,7 @@ class RNNSearchDecoder(object):
         # max(L) * E
 
         target_embeddings = get_output(self.nn, {self.nn_in[0]: x_pre_padded,
-                                                 self.nn_in[1]: enc_h})  # N * max(L) * E
+                                                 self.nn_in[1]: z})  # N * max(L) * E
 
         probs_numerators = T.sum(x_embedded * target_embeddings, axis=-1)  # N * max(L)
 
@@ -61,20 +61,20 @@ class RNNSearchDecoder(object):
 
         return probs
 
-    def log_p_x(self, x, x_embedded, x_embedded_dropped, enc_h, all_embeddings):
+    def log_p_x(self, x, x_embedded, x_embedded_dropped, z, all_embeddings):
 
         x_padding_mask = T.ge(x, 0)  # N * max(L)
 
-        probs = self.get_probs(x_embedded, x_embedded_dropped, enc_h, all_embeddings, mode='true')  # N * max(L)
+        probs = self.get_probs(x_embedded, x_embedded_dropped, z, all_embeddings, mode='true')  # N * max(L)
         probs += T.cast(1.e-5, 'float32')  # N * max(L)
 
         log_p_x = T.sum(x_padding_mask * T.log(probs), axis=-1)  # N
 
         return log_p_x
 
-    def beam_search(self, enc_h, all_embeddings, beam_size):
+    def beam_search(self, z, all_embeddings, beam_size):
 
-        N = enc_h.shape[0]
+        N = z.shape[0]
 
         best_scores_0 = T.zeros((N, beam_size))  # N * B
         active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
@@ -91,7 +91,7 @@ class RNNSearchDecoder(object):
                                          axis=1)[:, :-1]  # (N*B) * max(L) * E
 
             nn_input = {self.nn_in[0]: x_pre_padded,
-                        self.nn_in[1]: T.repeat(enc_h, beam_size, 0)}
+                        self.nn_in[1]: T.repeat(z, beam_size, 0)}
 
             target_embeddings = get_output(self.nn, nn_input)[:, l].reshape((N, beam_size, self.embedding_dim))
             # N * B * E
