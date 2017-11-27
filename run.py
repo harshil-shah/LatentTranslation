@@ -2344,6 +2344,23 @@ class RunDiscriminative(object):
             with open(os.path.join(self.load_param_dir, 'encoder_params.save'), 'rb') as f:
                 self.solver.encoder.set_param_values(cPickle.load(f))
 
+    def save_params(self, updates):
+
+        with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
+            cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
+            cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
+            cPickle.dump(self.solver.decoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
+            cPickle.dump(self.solver.encoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+            cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
+
     def load_words(self, folder, files, load_batch_size):
 
         words = []
@@ -2508,35 +2525,9 @@ class RunDiscriminative(object):
 
             if save_params_every is not None and i % save_params_every == 0 and i > 0:
 
-                with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
-                    cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
+                self.save_params(updates)
 
-                with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
-                    cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-                with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
-                    cPickle.dump(self.solver.decoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-                with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
-                    cPickle.dump(self.solver.encoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-                with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
-                    cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-        with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
-            cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-        with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
-            cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-        with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
-            cPickle.dump(self.solver.decoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-        with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
-            cPickle.dump(self.solver.encoder.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
-
-        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
-            cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
+        self.save_params(updates)
 
     def translate(self, num_outputs, beam_size=15):
 
@@ -2552,3 +2543,366 @@ class RunDiscriminative(object):
 
         for key, value in translations.items():
             np.save(os.path.join(self.out_dir, key + '.npy'), value)
+
+
+class RunDiscriminativeSSLMulti(object):
+
+    def __init__(self, solver, solver_kwargs, langs, valid_vocabs, main_dir, out_dir, dataset, load_param_dir=None,
+                 pre_trained=False):
+
+        self.langs = langs  # e.g. {0: 'en', 1: 'es', 2: 'fr'}
+        self.num_langs = len(langs)
+        self.valid_vocabs = valid_vocabs  # e.g. {0: [...], 1: [...], 2:[...]}
+
+        self.main_dir = main_dir
+        self.out_dir = out_dir
+        self.load_param_dir = load_param_dir
+
+        self.solver_kwargs = solver_kwargs
+
+        self.max_length = solver_kwargs['max_length']
+        self.vocab_size = solver_kwargs['vocab_size']
+
+        print('loading data')
+
+        start = time.clock()
+
+        self.x_only, self.x_both, self.x_test, self.L_only, self.L_both, self.L_test = self.load_data(dataset)
+
+        print('data loaded; time taken = ' + str(time.clock() - start) + ' seconds')
+
+        for l in range(self.num_langs):
+            print('num sentences ' + self.langs[l] + ' only = ' + str(len(self.L_only[l])))
+
+        for pair in combinations(range(self.num_langs), 2):
+            print('num sentences ' + str(pair) + ' = ' + str(len(self.L_both[pair][0])))
+
+        for pair in combinations(range(self.num_langs), 2):
+            print('num sentences ' + str(pair) + ' test = ' + str(len(self.L_test[pair][0])))
+
+        self.solver = solver(**self.solver_kwargs)
+
+        self.pre_trained = pre_trained
+
+        if self.pre_trained:
+
+            with open(os.path.join(self.load_param_dir, 'all_embeddings.save'), 'rb') as f:
+                all_embeddings = cPickle.load(f)
+                for l in range(self.num_langs):
+                    self.solver.all_embeddings[l].set_value(all_embeddings[l])
+                del all_embeddings
+
+            with open(os.path.join(self.load_param_dir, 'decoders_params.save'), 'rb') as f:
+                decoders_params = cPickle.load(f)
+                for l in range(self.num_langs):
+                    self.solver.decoders[l].set_param_values(decoders_params[l])
+                del decoders_params
+
+            with open(os.path.join(self.load_param_dir, 'encoders_params.save'), 'rb') as f:
+                encoders_params = cPickle.load(f)
+                for l in range(self.num_langs):
+                    self.solver.encoders[l].set_param_values(encoders_params[l])
+                del encoders_params
+
+    def save_params(self, updates):
+
+        with open(os.path.join(self.out_dir, 'all_embeddings.save'), 'wb') as f:
+            cPickle.dump([self.solver.all_embeddings[l].get_value() for l in range(self.num_langs)],
+                         f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'encoders_params.save'), 'wb') as f:
+            cPickle.dump([self.solver.encoders[l].get_param_values() for l in range(self.num_langs)],
+                         f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'decoders_params.save'), 'wb') as f:
+            cPickle.dump([self.solver.decoders[l].get_param_values() for l in range(self.num_langs)],
+                         f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+            cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+    def load_words(self, folder, files, load_batch_size):
+
+        words = []
+
+        for f in files:
+            with open(os.path.join(self.main_dir, folder, f), 'r') as s:
+                words += json.loads(s.read())
+
+        L = np.array([len(w) for w in words])
+
+        max_L = max(L)
+
+        word_arrays = []
+
+        start = time.clock()
+
+        batches_loaded = 0
+
+        for i in range(0, len(L), load_batch_size):
+
+            L_i = L[i: i+load_batch_size]
+
+            word_array = np.full((len(L_i), max_L), -1, dtype='int32')
+            word_array[L_i.reshape((L_i.shape[0], 1)) > np.arange(max_L)] = \
+                np.concatenate(words[i: i+load_batch_size])
+
+            word_arrays.append(word_array)
+
+            batches_loaded += 1
+
+            print(str(batches_loaded) + ' batches loaded (time taken = ' + str(time.clock() - start) +
+                  ' seconds)')
+
+        del words
+
+        return np.concatenate(word_arrays), L
+
+    def load_data(self, dataset, load_batch_size=500000):
+
+        folder = '../_datasets/' + dataset
+
+        x_only = {}
+        L_only = {}
+
+        for l in range(self.num_langs):
+
+            print('loading ' + self.langs[l] + ' only')
+
+            files_only_l = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.langs[l] +
+                                                                                 '_only')])
+
+            x_only_l, L_only_l = self.load_words(folder, files_only_l, load_batch_size)
+
+            x_only[l] = x_only_l
+            L_only[l] = L_only_l
+
+        x_both = {}
+        L_both = {}
+
+        x_test = {}
+        L_test = {}
+
+        for pair in combinations(range(self.num_langs), 2):
+
+            print('loading ' + str(pair))
+
+            l_0 = self.langs[pair[0]]
+            l_1 = self.langs[pair[1]]
+
+            files_both_l_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_0)
+                                     and not f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_both_l_0, L_both_l_0 = self.load_words(folder, files_both_l_0, load_batch_size)
+
+            files_both_l_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_1)
+                                     and not f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_both_l_1, L_both_l_1 = self.load_words(folder, files_both_l_1, load_batch_size)
+
+            x_both[pair] = (x_both_l_0, x_both_l_1)
+            L_both[pair] = (L_both_l_0, L_both_l_1)
+
+            files_test_l_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_0)
+                                     and f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_test_l_0, L_test_l_0 = self.load_words(folder, files_test_l_0, load_batch_size)
+
+            files_test_l_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_1)
+                                     and f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_test_l_1, L_test_l_1 = self.load_words(folder, files_test_l_1, load_batch_size)
+
+            x_test[pair] = (x_test_l_0, x_test_l_1)
+            L_test[pair] = (L_test_l_0, L_test_l_1)
+
+        return x_only, x_both, x_test, L_only, L_both, L_test
+
+    def get_translation_fn(self, l_in, l_out, beam_size):
+
+        return self.solver.translate_fn(l_in, l_out, beam_size)
+
+    def call_translation_fn(self, translation_fn, l_in, l_out, x_in, x_out_true):
+
+        guess = translation_fn(x_in)
+
+        out = OrderedDict()
+
+        suffix = '_for_translation_from_' + self.langs[l_in] + ' to ' + self.langs[l_out]
+
+        out['true_x_from' + suffix] = x_in
+        out['true_x_to' + suffix] = x_out_true
+        out['gen_x_to' + suffix] = guess
+
+        return out
+
+    def print_translations(self, translations, l_in, l_out):
+
+        suffix = '_for_translation_from_' + self.langs[l_in] + ' to ' + self.langs[l_out]
+
+        x_in = translations['true_x_from' + suffix]
+        x_out_true = translations['true_x_to' + suffix]
+        x_out_gen = translations['gen_x_to' + suffix]
+
+        print('='*10)
+        print('translations ' + self.langs[l_in] + ' to ' + self.langs[l_out])
+        print('='*10)
+
+        for n in range(x_in.shape[0]):
+
+            print('  in: ' + ' '.join([self.valid_vocabs[l_in][j] for j in x_in[n] if j >= 0]))
+            print('true: ' + ' '.join([self.valid_vocabs[l_out][j] for j in x_out_true[n] if j >= 0]))
+            print(' gen: ' + ' '.join([self.valid_vocabs[l_out][j] for j in x_out_gen[n] if j >= 0]))
+
+            print('-'*10)
+
+        print('='*10)
+
+    def make_drop_mask(self, word_drop, L):
+
+        drop_indices = np.array([np.random.permutation(np.arange(j))[:int(np.floor(word_drop * j))] for j in L])
+
+        drop_mask = np.ones((L.shape[0], self.max_length))
+
+        for n in range(len(drop_indices)):
+            drop_mask[n][drop_indices[n]] = 0.
+
+        return drop_mask
+
+    def train(self, n_iter, only_batch_size, both_batch_size, word_drop=None, grad_norm_constraint=None, update=adam,
+              update_kwargs=None, val_freq=None, val_batch_size=0, val_print_gen=5, val_beam_size=15,
+              save_params_every=None):
+
+        if self.pre_trained:
+            with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
+                saved_update = cPickle.load(f)
+            np.random.seed()
+        else:
+            saved_update = None
+
+        print('compiling optimiser')
+
+        optimiser, updates = self.solver.optimiser(grad_norm_constraint=grad_norm_constraint, update=update,
+                                                   update_kwargs=update_kwargs, saved_update=saved_update)
+
+        print('compiling optimiser done')
+
+        print('compiling log_p_x functions')
+
+        log_p_x_fns = {pair: self.solver.log_p_x_fn(pair[0], pair[1])
+                       for pair in combinations(range(self.num_langs), 2)}
+
+        print('compiling log_p_x functions done')
+
+        print('compiling translation functions')
+
+        translation_fns = {pair: self.get_translation_fn(pair[0], pair[1], val_beam_size)
+                           for pair in permutations(range(self.num_langs), 2)}
+
+        print('compiling translation functions done')
+
+        for i in range(n_iter):
+
+            start = time.clock()
+
+            batches_only = []
+            drop_masks_only = []
+
+            for pair in range(self.num_langs):
+
+                batch_indices_l = np.random.choice(len(self.x_only[pair]), only_batch_size)
+                batch_only_l = self.x_only[pair][batch_indices_l]
+                batches_only.append(batch_only_l)
+
+                if word_drop is not None:
+                    L_only_l = self.L_only[pair][batch_indices_l]
+                    drop_mask_only_l = self.make_drop_mask(word_drop, L_only_l)
+                else:
+                    drop_mask_only_l = np.ones_like(batch_only_l)
+
+                drop_masks_only.append(drop_mask_only_l)
+
+            batches_both = []
+            drop_masks_both = []
+
+            for pair in combinations(range(self.num_langs), 2):
+
+                batch_indices_l_both = np.random.choice(len(self.x_both[pair][0]), both_batch_size)
+                batch_both_l_0 = self.x_both[pair][0][batch_indices_l_both]
+                batch_both_l_1 = self.x_both[pair][1][batch_indices_l_both]
+                batches_both.append(batch_both_l_0)
+                batches_both.append(batch_both_l_1)
+
+                if word_drop is not None:
+                    L_both_l_0 = self.L_both[pair][0][batch_indices_l_both]
+                    drop_mask_both_l_0 = self.make_drop_mask(word_drop, L_both_l_0)
+
+                    L_both_l_1 = self.L_both[pair][1][batch_indices_l_both]
+                    drop_mask_both_l_1 = self.make_drop_mask(word_drop, L_both_l_1)
+                else:
+                    drop_mask_both_l_0 = np.ones_like(batch_both_l_0)
+                    drop_mask_both_l_1 = np.ones_like(batch_both_l_1)
+
+                drop_masks_both.append(drop_mask_both_l_0)
+                drop_masks_both.append(drop_mask_both_l_1)
+
+            optimiser_args = batches_only + batches_both + drop_masks_only + drop_masks_both
+
+            log_p_x = optimiser(*optimiser_args)
+
+            print('Iteration ' + str(i + 1) + ': log p x = ' + str(log_p_x) + ' per data point (time taken = ' +
+                  str(time.clock() - start) + ' seconds)')
+
+            if val_freq is not None and i % val_freq == 0:
+
+                for pair in combinations(range(self.num_langs), 2):
+
+                    val_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), val_batch_size)
+                    val_batch_l_0 = self.x_test[pair][0][val_batch_indices_l]
+                    val_batch_l_1 = self.x_test[pair][1][val_batch_indices_l]
+
+                    val_log_p_x = log_p_x_fns[pair](val_batch_l_0, val_batch_l_1)
+
+                    print('Test set ELBO ' + self.langs[pair[0]] + ' and ' + self.langs[pair[1]] + ' = ' +
+                          str(val_log_p_x) + ' per data point')
+
+                for pair in combinations(range(self.num_langs), 2):
+
+                    translation_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), val_print_gen)
+                    translation_batch_l_0 = self.x_test[pair][0][translation_batch_indices_l]
+                    translation_batch_l_1 = self.x_test[pair][1][translation_batch_indices_l]
+
+                    translations_0_to_1 = self.call_translation_fn(translation_fns[(pair[0], pair[1])], pair[0],
+                                                                   pair[1], translation_batch_l_0,
+                                                                   translation_batch_l_1)
+
+                    self.print_translations(translations_0_to_1, pair[0], pair[1])
+
+                    translations_1_to_0 = self.call_translation_fn(translation_fns[(pair[1], pair[0])], pair[1],
+                                                                   pair[0], translation_batch_l_1,
+                                                                   translation_batch_l_0)
+
+                    self.print_translations(translations_1_to_0, pair[1], pair[0])
+
+            if save_params_every is not None and i % save_params_every == 0 and i > 0:
+
+                self.save_params(updates)
+
+        self.save_params(updates)
+
+    def translate(self, num_outputs, beam_size=15):
+
+        np.random.seed(1234)
+
+        for pair in permutations(range(self.num_langs), 2):
+
+            batch_indices_l = np.random.choice(len(self.x_test[pair][0]), num_outputs)
+            batch_l_0 = self.x_test[pair][0][batch_indices_l]
+            batch_l_1 = self.x_test[pair][1][batch_indices_l]
+
+            translation_fn = self.get_translation_fn(pair[0], pair[1], beam_size)
+
+            translations = self.call_translation_fn(translation_fn, pair[0], pair[1], batch_l_0, batch_l_1)
+
+            for key, value in translations.items():
+                np.save(os.path.join(self.out_dir, key + '.npy'), value)

@@ -1,15 +1,16 @@
+import numpy as np
 import theano
 import theano.tensor as T
-from lasagne.layers import get_all_layers, get_all_params, get_all_param_values, get_output, InputLayer, \
+from lasagne.layers import DenseLayer, get_all_layers, get_all_params, get_all_param_values, get_output, InputLayer, \
     RecurrentLayer, set_all_param_values
-from lasagne.nonlinearities import linear
-from nn.layers import RNNSearchLayer
+from lasagne.nonlinearities import linear, tanh
+from nn.layers import CanvasRNNLayer, RNNSearchLayer
 from model.utilities import last_d_softmax
 
 
-class RNNSearchDecoder(object):
+class Decoder(object):
 
-    def __init__(self, z_dim, max_length, embedding_dim, embedder, nn_kwargs):
+    def __init__(self, z_dim, max_length, embedding_dim, embedder):
 
         self.z_dim = z_dim
         self.max_length = max_length
@@ -17,23 +18,9 @@ class RNNSearchDecoder(object):
 
         self.embedder = embedder
 
-        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
-        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+    def get_target_embeddings(self, x_pre_padded, z):
 
-        self.nn_in, self.nn = self.nn_fn()
-
-    def nn_fn(self):
-
-        l_in_x = InputLayer((None, self.max_length, self.embedding_dim))
-
-        l_in_z = InputLayer((None, self.max_length, self.z_dim))
-
-        l_rnn = RNNSearchLayer(l_in_x, l_in_z, self.nn_rnn_hid_units, max_length=self.max_length,
-                               nonlinearity=self.nn_rnn_hid_nonlinearity)
-
-        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
-
-        return (l_in_x, l_in_z), l_out
+        raise NotImplementedError
 
     def get_probs(self, x_embedded, x_embedded_dropped, z, all_embeddings, mode='all'):
 
@@ -42,8 +29,7 @@ class RNNSearchDecoder(object):
         x_pre_padded = T.concatenate([T.zeros((N, 1, self.embedding_dim)), x_embedded_dropped], axis=1)[:, :-1]  # N *
         # max(L) * E
 
-        target_embeddings = get_output(self.nn, {self.nn_in[0]: x_pre_padded,
-                                                 self.nn_in[1]: z})  # N * max(L) * E
+        target_embeddings = self.get_target_embeddings(x_pre_padded, z)  # N * max(L) * E
 
         probs_numerators = T.sum(x_embedded * target_embeddings, axis=-1)  # N * max(L)
 
@@ -90,11 +76,8 @@ class RNNSearchDecoder(object):
             x_pre_padded = T.concatenate([T.zeros((N*beam_size, 1, self.embedding_dim)), active_paths_embedded],
                                          axis=1)[:, :-1]  # (N*B) * max(L) * E
 
-            nn_input = {self.nn_in[0]: x_pre_padded,
-                        self.nn_in[1]: T.repeat(z, beam_size, 0)}
-
-            target_embeddings = get_output(self.nn, nn_input)[:, l].reshape((N, beam_size, self.embedding_dim))
-            # N * B * E
+            target_embeddings = self.get_target_embeddings(x_pre_padded, T.repeat(z, beam_size, 0))
+            target_embeddings = target_embeddings[:, l].reshape((N, beam_size, self.embedding_dim))
 
             probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # N * B * D
 
@@ -133,6 +116,38 @@ class RNNSearchDecoder(object):
 
         return T.cast(words, 'int32')
 
+
+class RNNSearchDecoder(Decoder):
+
+    def __init__(self, z_dim, max_length, embedding_dim, embedder, nn_kwargs):
+
+        super().__init__(z_dim, max_length, embedding_dim, embedder)
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn_in, self.nn = self.nn_fn()
+
+    def nn_fn(self):
+
+        l_in_x = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_in_z = InputLayer((None, self.max_length, self.z_dim))
+
+        l_rnn = RNNSearchLayer(l_in_x, l_in_z, self.nn_rnn_hid_units, max_length=self.max_length,
+                               nonlinearity=self.nn_rnn_hid_nonlinearity)
+
+        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
+
+        return (l_in_x, l_in_z), l_out
+
+    def get_target_embeddings(self, x_pre_padded, z):
+
+        target_embeddings = get_output(self.nn, {self.nn_in[0]: x_pre_padded,
+                                                 self.nn_in[1]: z})  # N * max(L) * E
+
+        return target_embeddings
+
     def get_params(self):
 
         nn_params = get_all_params(get_all_layers(self.nn), trainable=True)
@@ -150,3 +165,99 @@ class RNNSearchDecoder(object):
         [nn_params_vals] = param_values
 
         set_all_param_values(get_all_layers(self.nn), nn_params_vals)
+
+
+class CanvasRNNDecoder(Decoder):
+
+    def __init__(self, z_dim, max_length, embedding_dim, embedder, nn_kwargs):
+
+        super().__init__(z_dim, max_length, embedding_dim, embedder)
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn = self.nn_fn()
+        self.read_attention_nn = self.read_attention_nn_fn()
+
+        self.W = theano.shared(np.float32(np.random.normal(0., 0.1, (self.z_dim + 3*self.embedding_dim,
+                                                                     self.embedding_dim))), name='W')
+
+    def nn_fn(self):
+
+        l_in_z = InputLayer((None, self.max_length, self.z_dim))
+
+        l_out = CanvasRNNLayer(l_in_z, self.nn_rnn_hid_units, max_length=self.max_length,
+                               embedding_size=self.embedding_dim, nonlinearity=self.nn_rnn_hid_nonlinearity,
+                               only_return_final=True)
+
+        return l_out
+
+    def read_attention_nn_fn(self):
+
+        l_in = InputLayer((None, self.max_length, self.z_dim))
+
+        l_prev = l_in
+
+        for h in range(2):
+
+            l_prev = DenseLayer(l_prev, num_units=500, nonlinearity=tanh)
+
+        l_out = DenseLayer(l_prev, num_units=self.max_length**2, nonlinearity=None)
+
+        return l_out
+
+    def read_attention(self, z):
+
+        N = z.shape[0]
+
+        read_attention = get_output(self.read_attention_nn, z).reshape((N, self.max_length, self.max_length))  # N *
+        # max(L) * max(L)
+
+        read_attention_mask = T.switch(T.eq(T.tril(T.ones((self.max_length, self.max_length)), -2), 0), -np.inf, 1.)
+        # max(L) * max(L)
+
+        read_attention_pre_softmax = read_attention * T.shape_padleft(read_attention_mask)  # N * max(L) * max(L)
+
+        read_attention_pre_softmax = T.switch(T.isinf(read_attention_pre_softmax), -np.inf, read_attention_pre_softmax)
+        # N * max(L) * max(L)
+
+        read_attention_softmax = last_d_softmax(read_attention_pre_softmax)  # N * max(L) * max(L)
+
+        read_attention_softmax = T.switch(T.isnan(read_attention_softmax), 0,
+                                          read_attention_softmax)  # N * max(L) * max(L)
+
+        return read_attention_softmax
+
+    def get_target_embeddings(self, x_pre_padded, z):
+
+        read_attention = self.read_attention(z)  # N * max(L) * max(L)
+
+        total_written = T.batched_dot(read_attention, x_pre_padded)  # N * max(L) * E
+
+        canvases = get_output(self.nn, z)  # N * max(L) * E
+
+        target_embeddings = T.dot(T.concatenate((z, total_written, x_pre_padded, canvases), axis=-1),
+                                  self.W)  # N * max(L) * E
+
+        return target_embeddings
+
+    def get_params(self):
+
+        nn_params = get_all_params(get_all_layers(self.nn), trainable=True)
+        read_attention_nn_params = get_all_params(get_all_layers(self.read_attention_nn), trainable=True)
+
+        return nn_params + read_attention_nn_params
+
+    def get_param_values(self):
+
+        nn_params_vals = get_all_param_values(get_all_layers(self.nn))
+        read_attention_nn_params_vals = get_all_param_values(get_all_layers(self.read_attention_nn))
+
+        return [nn_params_vals, read_attention_nn_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [nn_params_vals, read_attention_nn_params_vals] = param_values
+
+        set_all_param_values(get_all_layers(self.nn), nn_params_vals)
+        set_all_param_values(get_all_layers(self.read_attention_nn), read_attention_nn_params_vals)
