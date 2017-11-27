@@ -19,7 +19,7 @@ class Encoder(object):
 
         raise NotImplementedError()
 
-    def get_hid(self, x, x_embedded):
+    def get_z(self, x, x_embedded):
 
         raise NotImplementedError()
 
