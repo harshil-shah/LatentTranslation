@@ -8,9 +8,7 @@ class Encoder(object):
     def __init__(self, z_dim, max_length, embedding_dim):
 
         self.z_dim = z_dim
-
         self.max_length = max_length
-
         self.embedding_dim = embedding_dim
 
         self.nn = self.nn_fn()
