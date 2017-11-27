@@ -20,17 +20,7 @@ class RNNSearchDecoder(object):
         self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
         self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
 
-        self.alignment_nn = self.alignment_nn_fn()
-
         self.nn_in, self.nn = self.nn_fn()
-
-    def alignment_nn_fn(self):
-
-        l_in_h = InputLayer((None, self.max_length, self.nn_rnn_hid_units + self.enc_h_dim))
-
-        l_out = RecurrentLayer(l_in_h, 1, W_hid_to_hid=T.zeros, nonlinearity=linear)
-
-        return l_out
 
     def nn_fn(self):
 
