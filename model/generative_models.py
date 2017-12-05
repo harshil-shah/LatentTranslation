@@ -3,8 +3,9 @@ import theano
 import theano.tensor as T
 from lasagne.layers import ConcatLayer, DenseLayer, get_all_layers, get_all_param_values, get_all_params, get_output, \
     InputLayer, LSTMLayer, RecurrentLayer, set_all_param_values
-from lasagne.nonlinearities import linear
-from nn.layers import CanvasRNNLayer, RNNSearchLayer
+from lasagne.nonlinearities import linear, tanh
+from nn.layers import CanvasRNNLayer, LSTMLayer0Mask, RNNSearchLayer
+from nn.nonlinearities import elu_plus_one
 
 from .utilities import last_d_softmax
 
@@ -1836,3 +1837,747 @@ class GenRNNSearch(object):
         [nn_params_vals] = param_values
 
         set_all_param_values(get_all_layers(self.nn), nn_params_vals)
+
+
+class GenVNMT(object):
+
+    def __init__(self, z_dim, max_length, vocab_size, embedding_dim, embedder, dist_z, dist_x, nn_kwargs):
+
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+
+        self.embedder = embedder
+
+        self.rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.dist_z = dist_z()
+        self.dist_x = dist_x()
+
+        self.rnn_x_0 = self.rnn_x_0_fn()
+        self.nn_z = self.nn_z_fn()
+        self.rnn_x_1_in, self.rnn_x_1 = self.rnn_x_1_fn()
+
+    def rnn_x_0_fn(self):
+
+        l_in = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_mask = InputLayer((None, self.max_length))
+
+        l_forward = LSTMLayer0Mask(l_in, int(self.rnn_hid_units/2), nonlinearity=self.rnn_hid_nonlinearity,
+                                   mask_input=l_mask)
+        l_backward = LSTMLayer0Mask(l_in, int(self.rnn_hid_units/2), nonlinearity=self.rnn_hid_nonlinearity,
+                                    mask_input=l_mask, backwards=True)
+
+        return l_forward, l_backward
+
+    def nn_z_fn(self):
+
+        l_in = InputLayer((None, self.rnn_hid_units))
+
+        l_out = DenseLayer(l_in, self.z_dim * 2, nonlinearity=linear)
+
+        return l_out
+
+    def rnn_x_1_fn(self):
+
+        l_in_x_1 = InputLayer((None, self.max_length, self.embedding_dim + self.z_dim))
+
+        l_in_h = InputLayer((None, self.max_length, self.rnn_hid_units))
+
+        l_rnn = RNNSearchLayer(l_in_x_1, l_in_h, self.rnn_hid_units, max_length=self.max_length,
+                               nonlinearity=self.rnn_hid_nonlinearity)
+
+        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
+
+        return (l_in_x_1, l_in_h), l_out
+
+    def get_h(self, x_0, x_0_embedded):
+
+        mask = T.ge(x_0, 0)  # N * max(L)
+
+        h_forward = self.rnn_x_0[0].get_output_for([x_0_embedded, mask])  # N * max(L) * (dim(hid)/2)
+        h_backward = self.rnn_x_0[1].get_output_for([x_0_embedded, mask])  # N * max(L) * (dim(hid)/2)
+
+        h = T.concatenate([h_forward, h_backward], axis=-1)  # N * max(L) * dim(hid)
+
+        return h
+
+    def get_z_means_and_covs(self, x_0, x_0_embedded):
+
+        h = self.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        mask = T.ge(x_0, 0)  # N * max(L)
+
+        h_avg = T.sum(h, axis=1) / T.shape_padright(T.sum(mask, axis=1))  # N * dim(hid)
+
+        means_and_covs = get_output(self.nn_z, h_avg)  # N * (2*dim(z))
+
+        means = means_and_covs[:, :self.z_dim]  # N * dim(z)
+        covs = elu_plus_one(means_and_covs[:, -self.z_dim:])  # N * dim(z)
+
+        return means, covs
+
+    def get_samples_z(self, x_0, x_0_embedded, num_samples):
+
+        means, covs = self.get_z_means_and_covs(x_0, x_0_embedded)
+
+        samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        return samples
+
+    def log_p_z(self, z, x_0, x_0_embedded):
+
+        means, covs = self.get_z_means_and_covs(x_0, x_0_embedded)
+
+        log_p_z = self.dist_z.log_density(z, [means, covs])  # (S*N)
+
+        return log_p_z
+
+    def kl(self, x_0, x_0_embedded, means_rec, covs_rec):
+
+        means_gen, covs_gen = self.get_z_means_and_covs(x_0, x_0_embedded)
+
+        kl = 0.5 * T.sum((covs_rec/covs_gen) + (((means_gen - means_rec)**2)/covs_gen) - T.ones_like(means_gen) +
+                         T.log(covs_gen/covs_rec), axis=range(1, means_rec.ndim))
+
+        return kl
+
+    def get_target_embeddings(self, x_0, x_0_embedded, z, x_1_pre_padded):
+
+        h = self.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        target_embeddings = get_output(self.rnn_x_1, {
+            self.rnn_x_1_in[0]: T.cast(T.concatenate([x_1_pre_padded, T.tile(T.shape_padaxis(z, 1),
+                                                                             (1, self.max_length, 1))],
+                                                     axis=-1), 'float32'),
+            self.rnn_x_1_in[1]: T.cast(h, 'float32'),
+        })  # N * max(L) * E
+
+        return target_embeddings
+
+    def get_probs(self, x_0, x_0_embedded, x_1_embedded, x_1_embedded_dropped, z, all_embeddings, mode='all'):
+
+        N = x_1_embedded.shape[0]
+
+        x_1_pre_padded = T.concatenate([T.zeros((N, 1, self.embedding_dim)), x_1_embedded_dropped], axis=1)[:, :-1]
+        # N * max(L) * E
+
+        target_embeddings = self.get_target_embeddings(x_0, x_0_embedded, z, x_1_pre_padded)  # N * max(L) * E
+
+        probs_numerators = T.sum(x_1_embedded * target_embeddings, axis=-1)  # N * max(L)
+
+        probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # N * max(L) * D
+
+        if mode == 'all':
+            probs = last_d_softmax(probs_denominators)  # N * max(L) * D
+        elif mode == 'true':
+            probs_numerators -= T.max(probs_denominators, axis=-1)
+            probs_denominators -= T.max(probs_denominators, axis=-1, keepdims=True)
+
+            probs = T.exp(probs_numerators) / T.sum(T.exp(probs_denominators), axis=-1)  # N * max(L)
+        else:
+            raise Exception("mode must be in ['all', 'true']")
+
+        return probs
+
+    def log_p_x_1(self, x_0, x_0_embedded, z, x_1, x_1_embedded, x_1_embedded_dropped, all_embeddings):
+
+        N = x_1.shape[0]
+        S = T.cast(z.shape[0] / N, 'int32')
+
+        x_0_rep = T.tile(x_0, (S, 1))  # (S*N) * max(L)
+        x_0_embedded_rep = T.tile(x_0_embedded, (S, 1, 1))  # (S*N) * max(L) * E
+
+        x_1_rep = T.tile(x_1, (S, 1))  # (S*N) * max(L)
+        x_1_embedded_rep = T.tile(x_1_embedded, (S, 1, 1))  # (S*N) * max(L) * E
+        x_1_embedded_dropped_rep = T.tile(x_1_embedded_dropped, (S, 1, 1))  # (S*N) * max(L) * E
+
+        probs = self.get_probs(x_0_rep, x_0_embedded_rep, x_1_embedded_rep, x_1_embedded_dropped_rep, z, all_embeddings,
+                               mode='true')  # (S*N) * max(L)
+        probs += T.cast(1.e-5, 'float32')  # (S*N) * max(L)
+
+        x_1_rep_padding_mask = T.ge(x_1_rep, 0)  # (S*N) * max(L)
+
+        log_p_x_1 = T.sum(x_1_rep_padding_mask * T.log(probs), axis=-1)  # (S*N)
+
+        return log_p_x_1
+
+    def beam_search(self, x_0, x_0_embedded, z, all_embeddings, beam_size):
+
+        N = z.shape[0]
+
+        best_scores_0 = T.zeros((N, beam_size))  # N * B
+        active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
+
+        x_0_rep = T.repeat(x_0, beam_size, 0)  # (N*B) * max(L)
+        x_0_embedded_rep = T.repeat(x_0_embedded, beam_size, 0)  # (N*B) * max(L) * E
+        z_rep = T.repeat(z, beam_size, 0)  # (N*B) * dim(z)
+
+        def step_forward(l, best_scores_lm1, active_paths_current, all_embeddings):
+
+            active_paths_embedded = self.embedder(T.cast(active_paths_current, 'int32'), all_embeddings)  # N * B *
+            # max(L) * E
+
+            active_paths_embedded = active_paths_embedded.reshape((N * beam_size, self.max_length, self.embedding_dim))
+            # (N*B) * max(L) * E
+
+            x_1_pre_padded = T.concatenate([T.zeros((N*beam_size, 1, self.embedding_dim)), active_paths_embedded],
+                                           axis=1)[:, :-1]  # (N*B) * max(L) * E
+
+            target_embeddings = self.get_target_embeddings(x_0_rep, x_0_embedded_rep, z_rep, x_1_pre_padded)  # (N*B) *
+            # max(L) * E
+            target_embeddings = target_embeddings[:, l].reshape((N, beam_size, self.embedding_dim))
+
+            probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # N * B * D
+
+            probs = last_d_softmax(probs_denominators)  # N * B * D
+
+            scores = T.shape_padright(best_scores_lm1) + T.log(probs)  # N * B * D
+
+            best_scores_l_all = T.max(scores, axis=1)  # N * D
+
+            best_scores_l = T.sort(best_scores_l_all, axis=-1)[:, -beam_size:]  # N * B
+
+            active_words_l = T.argsort(best_scores_l_all, axis=1)[:, -beam_size:]  # N * B
+
+            best_paths_l_all = T.argmax(scores, axis=1)  # N * D
+
+            best_paths_l_inds = best_paths_l_all[T.repeat(T.arange(N), beam_size), active_words_l.flatten()]
+            best_paths_l_inds = best_paths_l_inds.reshape((N, beam_size))  # N * B
+
+            best_paths_l = active_paths_current[T.repeat(T.arange(N), beam_size), best_paths_l_inds.flatten()].reshape(
+                (N, beam_size, self.max_length))  # N * B * max(L)
+
+            active_paths_new = T.set_subtensor(best_paths_l[:, :, l], active_words_l)
+
+            return best_scores_l, active_paths_new
+
+        ([best_scores, active_paths], _) = theano.scan(step_forward,
+                                                       sequences=T.arange(self.max_length),
+                                                       outputs_info=[best_scores_0, active_paths_init],
+                                                       non_sequences=[all_embeddings]
+                                                       )
+        # max(L) * N * B and max(L) * N * B * max(L)
+
+        active_paths = active_paths[-1]  # N * B * max(L)
+
+        words = active_paths[:, -1]  # N * max(L)
+
+        return T.cast(words, 'int32')
+
+    def beam_search_samples(self, x_0, x_0_embedded, z, log_p_z, all_embeddings, beam_size, num_samples):
+
+        N = T.cast(z.shape[0] / num_samples, 'int32')
+
+        best_scores_0 = T.zeros((N, beam_size))  # N * B
+        active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
+
+        x_0_rep = T.tile(T.repeat(x_0, beam_size, 0), (num_samples, 1))  # (S*N*B) * max(L)
+        x_0_embedded_rep = T.tile(T.repeat(x_0_embedded, beam_size, 0), (num_samples, 1))  # (S*N*B) * max(L) * E
+        z_rep = T.tile(T.repeat(z, beam_size, 0), (num_samples, 1))  # (S*N*B) * dim(z)
+
+        def step_forward(l, best_scores_lm1, active_paths_current, all_embeddings):
+
+            active_paths_embedded = self.embedder(T.cast(active_paths_current, 'int32'), all_embeddings)  # N * B *
+            # max(L) * E
+
+            active_paths_embedded = active_paths_embedded.reshape((N * beam_size, self.max_length, self.embedding_dim))
+            # (N*B) * max(L) * E
+
+            active_paths_embedded = T.tile(active_paths_embedded, (num_samples, 1, 1))  # (S*N*B) *  max(L) * E
+
+            x_1_pre_padded = T.concatenate([T.zeros((num_samples*N*beam_size, 1, self.embedding_dim)),
+                                            active_paths_embedded], axis=1)[:, :-1]  # (S*N*B) * max(L) * E
+
+            target_embeddings = self.get_target_embeddings(x_0_rep, x_0_embedded_rep, z_rep, x_1_pre_padded)  # (S*N*B)
+            # * max(L) * E
+            target_embeddings = target_embeddings[:, l].reshape((num_samples*N, beam_size, self.embedding_dim))  # (S*N)
+            # * B * E
+
+            probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # (S*N) * B * D
+
+            probs = last_d_softmax(probs_denominators)  # (S*N) * B * D
+
+            scores = T.shape_padright(T.tile(best_scores_lm1, (num_samples, 1))) + T.log(probs) + \
+                ((1./self.max_length) * T.shape_padright(log_p_z, 2))  # (S*N) * B * D
+            scores = T.mean(scores.reshape((num_samples, N, beam_size, self.vocab_size)), axis=0)  # N * B * D
+
+            best_scores_l_all = T.max(scores, axis=1)  # N * D
+
+            best_scores_l = T.sort(best_scores_l_all, axis=-1)[:, -beam_size:]  # N * B
+
+            active_words_l = T.argsort(best_scores_l_all, axis=1)[:, -beam_size:]  # N * B
+
+            best_paths_l_all = T.argmax(scores, axis=1)  # N * D
+
+            best_paths_l_inds = best_paths_l_all[T.repeat(T.arange(N), beam_size), active_words_l.flatten()]
+            best_paths_l_inds = best_paths_l_inds.reshape((N, beam_size))  # N * B
+
+            best_paths_l = active_paths_current[T.repeat(T.arange(N), beam_size), best_paths_l_inds.flatten()].reshape(
+                (N, beam_size, self.max_length))  # N * B * max(L)
+
+            active_paths_new = T.set_subtensor(best_paths_l[:, :, l], active_words_l)
+
+            return best_scores_l, active_paths_new
+
+        ([best_scores, active_paths], _) = theano.scan(step_forward,
+                                                       sequences=T.arange(self.max_length),
+                                                       outputs_info=[best_scores_0, active_paths_init],
+                                                       non_sequences=[all_embeddings]
+                                                       )
+        # max(L) * N * B and max(L) * N * B * max(L)
+
+        active_paths = active_paths[-1]  # N * B * max(L)
+
+        words = active_paths[:, -1]  # N * max(L)
+
+        return T.cast(words, 'int32')
+
+    def get_params(self):
+
+        rnn_x_0_params = get_all_params(get_all_layers(self.rnn_x_0), trainable=True)
+        nn_z_params = get_all_params(get_all_layers(self.nn_z), trainable=True)
+        rnn_x_1_params = get_all_params(get_all_layers(self.rnn_x_1), trainable=True)
+
+        return rnn_x_0_params + nn_z_params + rnn_x_1_params
+
+    def get_param_values(self):
+
+        rnn_x_0_params_vals = get_all_param_values(get_all_layers(self.rnn_x_0))
+        nn_z_params_vals = get_all_param_values(get_all_layers(self.nn_z))
+        rnn_x_1_params_vals = get_all_param_values(get_all_layers(self.rnn_x_1))
+
+        return [rnn_x_0_params_vals, nn_z_params_vals, rnn_x_1_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_x_0_params_vals, nn_z_params_vals, rnn_x_1_params_vals] = param_values
+
+        set_all_param_values(get_all_layers(self.rnn_x_0), rnn_x_0_params_vals)
+        set_all_param_values(get_all_layers(self.nn_z), nn_z_params_vals)
+        set_all_param_values(get_all_layers(self.rnn_x_1), rnn_x_1_params_vals)
+
+
+class GenVNMTNoSkip(GenVNMT):
+
+    def rnn_x_1_fn(self):
+
+        l_in_x_1 = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_in_h = InputLayer((None, self.max_length, self.z_dim))
+
+        l_rnn = RNNSearchLayer(l_in_x_1, l_in_h, self.rnn_hid_units, max_length=self.max_length,
+                               nonlinearity=self.rnn_hid_nonlinearity)
+
+        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
+
+        return (l_in_x_1, l_in_h), l_out
+
+    def get_z_means_and_covs(self, x_0, x_0_embedded):
+
+        N = x_0.shape[0]
+
+        h = self.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        means_and_covs = get_output(self.nn_z, h.reshape((N*self.max_length, self.rnn_hid_units)))  # (N*max(L)) *
+        # (2*dim(z))
+
+        means = means_and_covs[:, :self.z_dim].reshape((N, self.max_length, self.z_dim))  # N * max(L) * dim(z)
+        covs = elu_plus_one(means_and_covs[:, -self.z_dim:].reshape((N, self.max_length, self.z_dim)))  # N * max(L) *
+        # dim(z)
+
+        return means, covs
+
+    def get_target_embeddings(self, x_0, x_0_embedded, z, x_1_pre_padded):
+
+        target_embeddings = get_output(self.rnn_x_1, {
+            self.rnn_x_1_in[0]: T.cast(x_1_pre_padded, 'float32'),
+            self.rnn_x_1_in[1]: T.cast(z, 'float32'),
+        })  # N * max(L) * E
+
+        return target_embeddings
+
+
+class GenVNMTMultiIndicator(object):
+
+    def __init__(self, num_langs, z_dim, max_length, vocab_size, embedding_dim, embedder, dist_z, dist_x, nn_kwargs):
+
+        self.num_langs = num_langs
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+
+        self.embedder = embedder
+
+        self.rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.dist_z = dist_z()
+        self.dist_x = dist_x()
+
+        self.rnn_x_0 = self.rnn_x_0_fn()
+        self.nn_z = self.nn_z_fn()
+        self.rnn_x_1_in, self.rnn_x_1 = self.rnn_x_1_fn()
+
+    def rnn_x_0_fn(self):
+
+        l_in = InputLayer((None, self.max_length, self.embedding_dim + self.num_langs))
+
+        l_mask = InputLayer((None, self.max_length))
+
+        l_forward = LSTMLayer0Mask(l_in, int(self.rnn_hid_units/2), nonlinearity=self.rnn_hid_nonlinearity,
+                                   mask_input=l_mask)
+        l_backward = LSTMLayer0Mask(l_in, int(self.rnn_hid_units/2), nonlinearity=self.rnn_hid_nonlinearity,
+                                    mask_input=l_mask, backwards=True)
+
+        return l_forward, l_backward
+
+    def nn_z_fn(self):
+
+        l_in = InputLayer((None, self.rnn_hid_units))
+
+        l_out = DenseLayer(l_in, self.z_dim * 2, nonlinearity=linear)
+
+        return l_out
+
+    def rnn_x_1_fn(self):
+
+        l_in_x_1 = InputLayer((None, self.max_length, self.embedding_dim + self.z_dim + self.num_langs))
+
+        l_in_h = InputLayer((None, self.max_length, self.rnn_hid_units))
+
+        l_rnn = RNNSearchLayer(l_in_x_1, l_in_h, self.rnn_hid_units, max_length=self.max_length,
+                               nonlinearity=self.rnn_hid_nonlinearity)
+
+        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
+
+        return (l_in_x_1, l_in_h), l_out
+
+    def get_h(self, l_0, x_0, x_0_embedded):
+
+        l_0_one_hot = T.extra_ops.to_one_hot(l_0, self.num_langs)  # N * num_l
+        l_0_rep = T.tile(T.shape_padaxis(l_0_one_hot, 1), (1, self.max_length, 1))  # N * max(L) * num_l
+
+        mask = T.ge(x_0, 0)  # N * max(L)
+
+        rnn_input = T.concatenate((x_0_embedded, l_0_rep), axis=-1)  # N * max(L) * (E + num_l)
+
+        h_forward = self.rnn_x_0[0].get_output_for([rnn_input, mask])  # N * max(L) * (dim(hid)/2)
+        h_backward = self.rnn_x_0[1].get_output_for([rnn_input, mask])  # N * max(L) * (dim(hid)/2)
+
+        h = T.concatenate([h_forward, h_backward], axis=-1)  # N * max(L) * dim(hid)
+
+        return h
+
+    def get_z_means_and_covs(self, h, x_0):
+
+        mask = T.ge(x_0, 0)  # N * max(L)
+
+        h_avg = T.sum(h, axis=1) / T.shape_padright(T.sum(mask, axis=1))  # N * dim(hid)
+
+        means_and_covs = get_output(self.nn_z, h_avg)  # N * (2*dim(z))
+
+        means = means_and_covs[:, :self.z_dim]  # N * dim(z)
+        covs = elu_plus_one(means_and_covs[:, -self.z_dim:])  # N * dim(z)
+
+        return means, covs
+
+    def get_samples_z(self, h, x_0, num_samples):
+
+        means, covs = self.get_z_means_and_covs(h, x_0)
+
+        samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        return samples
+
+    def log_p_z(self, z, h, x_0):
+
+        S = T.cast(z.shape[0] / x_0.shape[0], 'int32')
+
+        means, covs = self.get_z_means_and_covs(h, x_0)
+
+        means = T.tile(means, (S, 1))
+        covs = T.tile(covs, (S, 1))
+
+        log_p_z = self.dist_z.log_density(z, [means, covs])  # (S*N)
+
+        return log_p_z
+
+    def kl(self, h, x_0, means_rec, covs_rec):
+
+        means_gen, covs_gen = self.get_z_means_and_covs(h, x_0)
+
+        kl = 0.5 * T.sum((covs_rec/covs_gen) + (((means_gen - means_rec)**2)/covs_gen) - T.ones_like(means_gen) +
+                         T.log(covs_gen/covs_rec), axis=range(1, means_rec.ndim))
+
+        return kl
+
+    def get_target_embeddings(self, l_1, h, z, x_1_pre_padded):
+
+        N = x_1_pre_padded.shape[0]
+
+        z_rep = T.tile(T.shape_padaxis(z, 1), (1, self.max_length, 1))  # N * max(L) * dim(z)
+
+        l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        rnn_x_1_input = T.concatenate([x_1_pre_padded, z_rep, l_1_rep], axis=-1)  # N * max(L) * (E + dim(z) + num_l)
+
+        target_embeddings = get_output(self.rnn_x_1, {
+            self.rnn_x_1_in[0]: T.cast(rnn_x_1_input, 'float32'),
+            self.rnn_x_1_in[1]: T.cast(h, 'float32'),
+        })  # N * max(L) * E
+
+        return target_embeddings
+
+    def get_probs(self, l_1, h, x_1_embedded, x_1_embedded_dropped, z, all_embeddings, mode='all'):
+
+        N = x_1_embedded.shape[0]
+
+        x_1_pre_padded = T.concatenate([T.zeros((N, 1, self.embedding_dim)), x_1_embedded_dropped], axis=1)[:, :-1]
+        # N * max(L) * E
+
+        target_embeddings = self.get_target_embeddings(l_1, h, z, x_1_pre_padded)  # N * max(L) * E
+
+        probs_numerators = T.sum(x_1_embedded * target_embeddings, axis=-1)  # N * max(L)
+
+        probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # N * max(L) * D
+
+        if mode == 'all':
+            probs = last_d_softmax(probs_denominators)  # N * max(L) * D
+        elif mode == 'true':
+            probs_numerators -= T.max(probs_denominators, axis=-1)
+            probs_denominators -= T.max(probs_denominators, axis=-1, keepdims=True)
+
+            probs = T.exp(probs_numerators) / T.sum(T.exp(probs_denominators), axis=-1)  # N * max(L)
+        else:
+            raise Exception("mode must be in ['all', 'true']")
+
+        return probs
+
+    def log_p_x_1(self, l_1, h, z, x_1, x_1_embedded, x_1_embedded_dropped, all_embeddings):
+
+        N = x_1.shape[0]
+        S = T.cast(z.shape[0] / N, 'int32')
+
+        h_rep = T.tile(h, (S, 1, 1))  # (S*N) * max(L) * dim(hid)
+
+        x_1_rep = T.tile(x_1, (S, 1))  # (S*N) * max(L)
+        x_1_embedded_rep = T.tile(x_1_embedded, (S, 1, 1))  # (S*N) * max(L) * E
+        x_1_embedded_dropped_rep = T.tile(x_1_embedded_dropped, (S, 1, 1))  # (S*N) * max(L) * E
+
+        probs = self.get_probs(l_1, h_rep, x_1_embedded_rep, x_1_embedded_dropped_rep, z, all_embeddings,
+                               mode='true')  # (S*N) * max(L)
+        probs += T.cast(1.e-5, 'float32')  # (S*N) * max(L)
+
+        x_1_rep_padding_mask = T.ge(x_1_rep, 0)  # (S*N) * max(L)
+
+        log_p_x_1 = T.sum(x_1_rep_padding_mask * T.log(probs), axis=-1)  # (S*N)
+
+        return log_p_x_1
+
+    def beam_search(self, l_0, l_1, x_0, x_0_embedded, z, all_embeddings, beam_size):
+
+        N = z.shape[0]
+
+        best_scores_0 = T.zeros((N, beam_size))  # N * B
+        active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
+
+        h = self.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+        h_rep = T.repeat(h, beam_size, 0)  # (N*B) * max(L) * dim(hid)
+
+        z_rep = T.repeat(z, beam_size, 0)  # (N*B) * dim(z)
+
+        def step_forward(l, best_scores_lm1, active_paths_current, all_embeddings):
+
+            active_paths_embedded = self.embedder(T.cast(active_paths_current, 'int32'), all_embeddings)  # N * B *
+            # max(L) * E
+
+            active_paths_embedded = active_paths_embedded.reshape((N * beam_size, self.max_length, self.embedding_dim))
+            # (N*B) * max(L) * E
+
+            x_1_pre_padded = T.concatenate([T.zeros((N*beam_size, 1, self.embedding_dim)), active_paths_embedded],
+                                           axis=1)[:, :-1]  # (N*B) * max(L) * E
+
+            target_embeddings = self.get_target_embeddings(l_1, h_rep, z_rep, x_1_pre_padded)  # (N*B) * max(L)
+            # * E
+            target_embeddings = target_embeddings[:, l].reshape((N, beam_size, self.embedding_dim))
+
+            probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # N * B * D
+
+            probs = last_d_softmax(probs_denominators)  # N * B * D
+
+            scores = T.shape_padright(best_scores_lm1) + T.log(probs)  # N * B * D
+
+            best_scores_l_all = T.max(scores, axis=1)  # N * D
+
+            best_scores_l = T.sort(best_scores_l_all, axis=-1)[:, -beam_size:]  # N * B
+
+            active_words_l = T.argsort(best_scores_l_all, axis=1)[:, -beam_size:]  # N * B
+
+            best_paths_l_all = T.argmax(scores, axis=1)  # N * D
+
+            best_paths_l_inds = best_paths_l_all[T.repeat(T.arange(N), beam_size), active_words_l.flatten()]
+            best_paths_l_inds = best_paths_l_inds.reshape((N, beam_size))  # N * B
+
+            best_paths_l = active_paths_current[T.repeat(T.arange(N), beam_size), best_paths_l_inds.flatten()].reshape(
+                (N, beam_size, self.max_length))  # N * B * max(L)
+
+            active_paths_new = T.set_subtensor(best_paths_l[:, :, l], active_words_l)
+
+            return best_scores_l, active_paths_new
+
+        ([best_scores, active_paths], _) = theano.scan(step_forward,
+                                                       sequences=T.arange(self.max_length),
+                                                       outputs_info=[best_scores_0, active_paths_init],
+                                                       non_sequences=[all_embeddings]
+                                                       )
+        # max(L) * N * B and max(L) * N * B * max(L)
+
+        active_paths = active_paths[-1]  # N * B * max(L)
+
+        words = active_paths[:, -1]  # N * max(L)
+
+        return T.cast(words, 'int32')
+
+    def beam_search_samples(self, l_0, l_1, x_0, x_0_embedded, z, log_p_z, all_embeddings, beam_size, num_samples):
+
+        N = T.cast(z.shape[0] / num_samples, 'int32')
+
+        best_scores_0 = T.zeros((N, beam_size))  # N * B
+        active_paths_init = -T.ones((N, beam_size, self.max_length))  # N * B * max(L)
+
+        h = self.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+        h_rep = T.tile(T.repeat(h, beam_size, 0), (num_samples, 1, 1))  # (S*N*B) * max(L) * dim(hid)
+
+        z_rep = T.tile(T.repeat(z, beam_size, 0), (num_samples, 1))  # (S*N*B) * dim(z)
+
+        def step_forward(l, best_scores_lm1, active_paths_current, all_embeddings):
+
+            active_paths_embedded = self.embedder(T.cast(active_paths_current, 'int32'), all_embeddings)  # N * B *
+            # max(L) * E
+
+            active_paths_embedded = active_paths_embedded.reshape((N * beam_size, self.max_length, self.embedding_dim))
+            # (N*B) * max(L) * E
+
+            active_paths_embedded = T.tile(active_paths_embedded, (num_samples, 1, 1))  # (S*N*B) *  max(L) * E
+
+            x_1_pre_padded = T.concatenate([T.zeros((num_samples*N*beam_size, 1, self.embedding_dim)),
+                                            active_paths_embedded], axis=1)[:, :-1]  # (S*N*B) * max(L) * E
+
+            target_embeddings = self.get_target_embeddings(l_1, h_rep, z_rep, x_1_pre_padded)  # (S*N*B) *
+            # max(L) * E
+            target_embeddings = target_embeddings[:, l].reshape((num_samples*N, beam_size, self.embedding_dim))  # (S*N)
+            # * B * E
+
+            probs_denominators = T.dot(target_embeddings, all_embeddings.T)  # (S*N) * B * D
+
+            probs = last_d_softmax(probs_denominators)  # (S*N) * B * D
+
+            scores = T.shape_padright(T.tile(best_scores_lm1, (num_samples, 1))) + T.log(probs) + \
+                     ((1./self.max_length) * T.shape_padright(log_p_z, 2))  # (S*N) * B * D
+            scores = T.mean(scores.reshape((num_samples, N, beam_size, self.vocab_size)), axis=0)  # N * B * D
+
+            best_scores_l_all = T.max(scores, axis=1)  # N * D
+
+            best_scores_l = T.sort(best_scores_l_all, axis=-1)[:, -beam_size:]  # N * B
+
+            active_words_l = T.argsort(best_scores_l_all, axis=1)[:, -beam_size:]  # N * B
+
+            best_paths_l_all = T.argmax(scores, axis=1)  # N * D
+
+            best_paths_l_inds = best_paths_l_all[T.repeat(T.arange(N), beam_size), active_words_l.flatten()]
+            best_paths_l_inds = best_paths_l_inds.reshape((N, beam_size))  # N * B
+
+            best_paths_l = active_paths_current[T.repeat(T.arange(N), beam_size), best_paths_l_inds.flatten()].reshape(
+                (N, beam_size, self.max_length))  # N * B * max(L)
+
+            active_paths_new = T.set_subtensor(best_paths_l[:, :, l], active_words_l)
+
+            return best_scores_l, active_paths_new
+
+        ([best_scores, active_paths], _) = theano.scan(step_forward,
+                                                       sequences=T.arange(self.max_length),
+                                                       outputs_info=[best_scores_0, active_paths_init],
+                                                       non_sequences=[all_embeddings]
+                                                       )
+        # max(L) * N * B and max(L) * N * B * max(L)
+
+        active_paths = active_paths[-1]  # N * B * max(L)
+
+        words = active_paths[:, -1]  # N * max(L)
+
+        return T.cast(words, 'int32')
+
+    def get_params(self):
+
+        rnn_x_0_params = get_all_params(get_all_layers(self.rnn_x_0), trainable=True)
+        nn_z_params = get_all_params(get_all_layers(self.nn_z), trainable=True)
+        rnn_x_1_params = get_all_params(get_all_layers(self.rnn_x_1), trainable=True)
+
+        return rnn_x_0_params + nn_z_params + rnn_x_1_params
+
+    def get_param_values(self):
+
+        rnn_x_0_params_vals = get_all_param_values(get_all_layers(self.rnn_x_0))
+        nn_z_params_vals = get_all_param_values(get_all_layers(self.nn_z))
+        rnn_x_1_params_vals = get_all_param_values(get_all_layers(self.rnn_x_1))
+
+        return [rnn_x_0_params_vals, nn_z_params_vals, rnn_x_1_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_x_0_params_vals, nn_z_params_vals, rnn_x_1_params_vals] = param_values
+
+        set_all_param_values(get_all_layers(self.rnn_x_0), rnn_x_0_params_vals)
+        set_all_param_values(get_all_layers(self.nn_z), nn_z_params_vals)
+        set_all_param_values(get_all_layers(self.rnn_x_1), rnn_x_1_params_vals)
+
+
+class GenVNMTMultiIndicatorNoSkip(GenVNMTMultiIndicator):
+
+    def rnn_x_1_fn(self):
+
+        l_in_x_1 = InputLayer((None, self.max_length, self.embedding_dim + self.num_langs))
+
+        l_in_h = InputLayer((None, self.max_length, self.z_dim))
+
+        l_rnn = RNNSearchLayer(l_in_x_1, l_in_h, self.rnn_hid_units, max_length=self.max_length,
+                               nonlinearity=self.rnn_hid_nonlinearity)
+
+        l_out = RecurrentLayer(l_rnn, self.embedding_dim, W_hid_to_hid=T.zeros, nonlinearity=linear)
+
+        return (l_in_x_1, l_in_h), l_out
+
+    def get_z_means_and_covs(self, h, x_0):
+
+        N = h.shape[0]
+
+        means_and_covs = get_output(self.nn_z, h.reshape((N*self.max_length, self.rnn_hid_units)))  # (N*max(L)) *
+        # (2*dim(z))
+
+        means = means_and_covs[:, :self.z_dim].reshape((N, self.max_length, self.z_dim))  # N * max(L) * dim(z)
+        covs = elu_plus_one(means_and_covs[:, -self.z_dim:].reshape((N, self.max_length, self.z_dim)))  # N * max(L) *
+        # dim(z)
+
+        return means, covs
+
+    def get_target_embeddings(self, l_1, h, z, x_1_pre_padded):
+
+        N = x_1_pre_padded.shape[0]
+
+        l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        rnn_x_1_input = T.concatenate([x_1_pre_padded, l_1_rep], axis=-1)  # N * max(L) * (E + dim(z) + num_l)
+
+        target_embeddings = get_output(self.rnn_x_1, {
+            self.rnn_x_1_in[0]: T.cast(rnn_x_1_input, 'float32'),
+            self.rnn_x_1_in[1]: T.cast(z, 'float32'),
+        })  # N * max(L) * E
+
+        return target_embeddings

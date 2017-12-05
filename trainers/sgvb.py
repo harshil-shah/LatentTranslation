@@ -8,6 +8,30 @@ from nn.nonlinearities import elu_plus_one
 from lasagne.updates import norm_constraint
 
 
+def embedder(x, all_embeddings):
+
+    all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
+
+    return all_embeddings[x]
+
+
+def cut_off(x, eos_ind):
+
+    def step(x_l, x_lm1):
+
+        x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
+        x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
+
+        return T.cast(x_l, 'int32')
+
+    x_cut_off, _ = theano.scan(step,
+                               sequences=x.T,
+                               outputs_info=T.zeros((x.shape[0],), 'int32'),
+                               )
+
+    return x_cut_off.T
+
+
 class SGVBWords(object):
 
     def __init__(self, generative_model_0, generative_model_1, recognition_model, z_dim, max_length_0, max_length_1,
@@ -45,10 +69,10 @@ class SGVBWords(object):
     def init_generative_models(self, generative_model_0, generative_model_1):
 
         generative_model_0 = generative_model_0(self.z_dim, self.max_length_0, self.vocab_size_0, self.embedding_dim_0,
-                                                self.embedder, self.dist_z_gen, self.dist_x_0_gen, self.gen_nn_0_kwargs)
+                                                embedder, self.dist_z_gen, self.dist_x_0_gen, self.gen_nn_0_kwargs)
 
         generative_model_1 = generative_model_1(self.z_dim, self.max_length_1, self.vocab_size_1, self.embedding_dim_1,
-                                                self.embedder, self.dist_z_gen, self.dist_x_1_gen, self.gen_nn_1_kwargs)
+                                                embedder, self.dist_z_gen, self.dist_x_1_gen, self.gen_nn_1_kwargs)
 
         return generative_model_0, generative_model_1
 
@@ -59,32 +83,10 @@ class SGVBWords(object):
 
         return recognition_model
 
-    def embedder(self, x, all_embeddings):
-
-        all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
-
-        return all_embeddings[x]
-
-    def cut_off(self, x, eos_ind):
-
-        def step(x_l, x_lm1):
-
-            x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
-            x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
-
-            return T.cast(x_l, 'int32')
-
-        x_cut_off, _ = theano.scan(step,
-                                   sequences=x.T,
-                                   outputs_info=T.zeros((x.shape[0],), 'int32'),
-                                   )
-
-        return x_cut_off.T
-
     def symbolic_elbo(self, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian(x_0, x_0_embedded, x_1, x_1_embedded,
                                                                        num_samples)  # (S*N) * dim(z) and N
@@ -182,8 +184,8 @@ class SGVBWords(object):
         x_0 = T.imatrix('x_0')  # N * max(L)
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)
 
         z = self.recognition_model.get_samples(x_0, x_0_embedded, x_1, x_1_embedded, 1, means_only=True)  # N * dim(z)
 
@@ -211,8 +213,8 @@ class SGVBWords(object):
             all_embeddings_to = self.all_embeddings_0
             eos_ind_to = self.eos_ind_0
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         if from_index == 0:
 
@@ -228,7 +230,7 @@ class SGVBWords(object):
 
             x_to = self.generative_model_0.beam_search(z, self.all_embeddings_0, beam_size, num_time_steps)
 
-        x_to = self.cut_off(x_to, eos_ind_to)
+        x_to = cut_off(x_to, eos_ind_to)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -249,8 +251,8 @@ class SGVBWords(object):
             all_embeddings_to = self.all_embeddings_0
             eos_ind_to = self.eos_ind_0
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         if from_index == 0:
 
@@ -268,7 +270,7 @@ class SGVBWords(object):
             x_to = self.generative_model_0.beam_search_samples(z, self.all_embeddings_0, beam_size, num_samples,
                                                                num_time_steps)
 
-        x_to = self.cut_off(x_to, eos_ind_to)
+        x_to = cut_off(x_to, eos_ind_to)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -316,10 +318,10 @@ class SGVBWordsSSL(object):
     def init_generative_models(self, generative_model_0, generative_model_1):
 
         generative_model_0 = generative_model_0(self.z_dim, self.max_length_0, self.vocab_size_0, self.embedding_dim_0,
-                                                self.embedder, self.dist_z_gen, self.dist_x_0_gen, self.gen_nn_0_kwargs)
+                                                embedder, self.dist_z_gen, self.dist_x_0_gen, self.gen_nn_0_kwargs)
 
         generative_model_1 = generative_model_1(self.z_dim, self.max_length_1, self.vocab_size_1, self.embedding_dim_1,
-                                                self.embedder, self.dist_z_gen, self.dist_x_1_gen, self.gen_nn_1_kwargs)
+                                                embedder, self.dist_z_gen, self.dist_x_1_gen, self.gen_nn_1_kwargs)
 
         return generative_model_0, generative_model_1
 
@@ -330,32 +332,10 @@ class SGVBWordsSSL(object):
 
         return recognition_model
 
-    def embedder(self, x, all_embeddings):
-
-        all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
-
-        return all_embeddings[x]
-
-    def cut_off(self, x, eos_ind):
-
-        def step(x_l, x_lm1):
-
-            x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
-            x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
-
-            return T.cast(x_l, 'int32')
-
-        x_cut_off, _ = theano.scan(step,
-                                   sequences=x.T,
-                                   outputs_info=T.zeros((x.shape[0],), 'int32'),
-                                   )
-
-        return x_cut_off.T
-
     def symbolic_elbo_both(self, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded,
                                                                             num_samples)  # (S*N) * dim(z) and N
@@ -385,7 +365,7 @@ class SGVBWordsSSL(object):
 
     def symbolic_elbo_0_only(self, x_0, num_samples, beta=None, drop_mask_0=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_0_only(x_0, x_0_embedded, num_samples)  # (S*N) *
         # dim(z) and N
@@ -407,7 +387,7 @@ class SGVBWordsSSL(object):
 
     def symbolic_elbo_1_only(self, x_1, num_samples, beta=None, drop_mask_1=None):
 
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_1_only(x_1, x_1_embedded, num_samples)  # (S*N) *
         # dim(z) and N
@@ -537,8 +517,8 @@ class SGVBWordsSSL(object):
         x_0 = T.imatrix('x_0')  # N * max(L)
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded, 1,
                                                                            means_only=True)  # N * dim(z)
@@ -548,8 +528,8 @@ class SGVBWordsSSL(object):
         x_beam_1 = self.generative_model_1.beam_search(z, self.all_embeddings_1, beam_size, num_time_steps)  # S *
         # max(L)
 
-        x_beam_0 = self.cut_off(x_beam_0, self.eos_ind_0)
-        x_beam_1 = self.cut_off(x_beam_1, self.eos_ind_1)
+        x_beam_0 = cut_off(x_beam_0, self.eos_ind_0)
+        x_beam_1 = cut_off(x_beam_1, self.eos_ind_1)
 
         return theano.function(inputs=[x_0, x_1],
                                outputs=[x_beam_0, x_beam_1],
@@ -560,7 +540,7 @@ class SGVBWordsSSL(object):
 
         x_0 = T.imatrix('x_0')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings_0)
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_0_only(x_0, x_0_embedded, 1, means_only=True)
         # N * dim(z)
@@ -570,8 +550,8 @@ class SGVBWordsSSL(object):
         x_beam_1 = self.generative_model_1.beam_search(z, self.all_embeddings_1, beam_size, num_time_steps)  # S *
         # max(L)
 
-        x_beam_0 = self.cut_off(x_beam_0, self.eos_ind_0)
-        x_beam_1 = self.cut_off(x_beam_1, self.eos_ind_1)
+        x_beam_0 = cut_off(x_beam_0, self.eos_ind_0)
+        x_beam_1 = cut_off(x_beam_1, self.eos_ind_1)
 
         return theano.function(inputs=[x_0],
                                outputs=[x_beam_0, x_beam_1],
@@ -582,7 +562,7 @@ class SGVBWordsSSL(object):
 
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_1_embedded = self.embedder(x_1, self.all_embeddings_1)
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_1_only(x_1, x_1_embedded, 1, means_only=True)
         # N * dim(z)
@@ -592,8 +572,8 @@ class SGVBWordsSSL(object):
         x_beam_1 = self.generative_model_1.beam_search(z, self.all_embeddings_1, beam_size, num_time_steps)  # S *
         # max(L)
 
-        x_beam_0 = self.cut_off(x_beam_0, self.eos_ind_0)
-        x_beam_1 = self.cut_off(x_beam_1, self.eos_ind_1)
+        x_beam_0 = cut_off(x_beam_0, self.eos_ind_0)
+        x_beam_1 = cut_off(x_beam_1, self.eos_ind_1)
 
         return theano.function(inputs=[x_1],
                                outputs=[x_beam_0, x_beam_1],
@@ -614,8 +594,8 @@ class SGVBWordsSSL(object):
             all_embeddings_to = self.all_embeddings_0
             eos_ind_to = self.eos_ind_0
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         if from_index == 0:
 
@@ -634,7 +614,7 @@ class SGVBWordsSSL(object):
 
             x_to = self.generative_model_0.beam_search(z, self.all_embeddings_0, beam_size, num_time_steps)
 
-        x_to = self.cut_off(x_to, eos_ind_to)
+        x_to = cut_off(x_to, eos_ind_to)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -655,8 +635,8 @@ class SGVBWordsSSL(object):
             all_embeddings_to = self.all_embeddings_0
             eos_ind_to = self.eos_ind_0
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         if from_index == 0:
 
@@ -676,7 +656,7 @@ class SGVBWordsSSL(object):
             x_to = self.generative_model_0.beam_search_samples(z, self.all_embeddings_0, beam_size, num_samples,
                                                                num_time_steps)
 
-        x_to = self.cut_off(x_to, eos_ind_to)
+        x_to = cut_off(x_to, eos_ind_to)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -723,7 +703,7 @@ class SGVBWordsMulti(object):
         for l in range(self.num_langs):
 
             generative_models.append(generative_model(self.z_dim, self.max_length, self.vocab_size, self.embedding_dim,
-                                                      self.embedder, self.dist_z_gen, self.dist_x_gen,
+                                                      embedder, self.dist_z_gen, self.dist_x_gen,
                                                       self.gen_nn_kwargs))
 
         return generative_models
@@ -735,32 +715,10 @@ class SGVBWordsMulti(object):
 
         return recognition_model
 
-    def embedder(self, x, all_embeddings):
-
-        all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
-
-        return all_embeddings[x]
-
-    def cut_off(self, x, eos_ind):
-
-        def step(x_l, x_lm1):
-
-            x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
-            x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
-
-            return T.cast(x_l, 'int32')
-
-        x_cut_off, _ = theano.scan(step,
-                                   sequences=x.T,
-                                   outputs_info=T.zeros((x.shape[0],), 'int32'),
-                                   )
-
-        return x_cut_off.T
-
     def symbolic_elbo_both(self, l_0, l_1, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1,
                                                                        num_samples)  # (S*N) * dim(z) and N
@@ -873,7 +831,7 @@ class SGVBWordsMulti(object):
             x_beam_l = self.generative_models[l].beam_search(z, self.all_embeddings[l], beam_size, num_time_steps)  # S
             # * max(L)
 
-            x_beam_l = self.cut_off(x_beam_l, self.eos_ind)
+            x_beam_l = cut_off(x_beam_l, self.eos_ind)
 
             outputs.append(x_beam_l)
 
@@ -895,8 +853,8 @@ class SGVBWordsMulti(object):
         x_0 = T.imatrix('x_0')  # N * max(L)
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, 1,
                                                                       means_only=True)  # N * dim(z)
@@ -916,8 +874,8 @@ class SGVBWordsMulti(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_from, x_from_embedded, x_to_best_guess,
                                                                       x_to_best_guess_embedded, l_from, l_to, 1,
@@ -925,7 +883,7 @@ class SGVBWordsMulti(object):
 
         x_to = self.generative_models[l_to].beam_search(z, self.all_embeddings[l_to], beam_size, num_time_steps)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -940,8 +898,8 @@ class SGVBWordsMulti(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian(x_from, x_from_embedded, x_to_best_guess,
                                                                       x_to_best_guess_embedded, l_from, l_to,
@@ -950,7 +908,7 @@ class SGVBWordsMulti(object):
         x_to = self.generative_models[l_to].beam_search_samples(z, self.all_embeddings[l_to], beam_size, num_samples,
                                                                 num_time_steps)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -1009,7 +967,7 @@ class SGVBWordsSSLMulti(object):
         for l in range(self.num_langs):
 
             generative_models.append(generative_model(self.z_dim, self.max_length, self.vocab_size, self.embedding_dim,
-                                                      self.embedder, self.dist_z_gen, self.dist_x_gen,
+                                                      embedder, self.dist_z_gen, self.dist_x_gen,
                                                       self.gen_nn_kwargs))
 
         return generative_models
@@ -1021,31 +979,9 @@ class SGVBWordsSSLMulti(object):
 
         return recognition_model
 
-    def embedder(self, x, all_embeddings):
-
-        all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
-
-        return all_embeddings[x]
-
-    def cut_off(self, x, eos_ind):
-
-        def step(x_l, x_lm1):
-
-            x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
-            x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
-
-            return T.cast(x_l, 'int32')
-
-        x_cut_off, _ = theano.scan(step,
-                                   sequences=x.T,
-                                   outputs_info=T.zeros((x.shape[0],), 'int32'),
-                                   )
-
-        return x_cut_off.T
-
     def symbolic_elbo_only(self, l, x, num_samples, beta=None, drop_mask=None):
 
-        x_embedded = self.embedder(x, self.all_embeddings[l])  # N * max(L) * E
+        x_embedded = embedder(x, self.all_embeddings[l])  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_only(x, x_embedded, l, num_samples)  # (S*N) *
         # dim(z) and N
@@ -1067,8 +1003,8 @@ class SGVBWordsSSLMulti(object):
 
     def symbolic_elbo_both(self, l_0, l_1, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
 
         z, kl = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0,
                                                                             l_1, num_samples)  # (S*N) * dim(z) and N
@@ -1192,7 +1128,7 @@ class SGVBWordsSSLMulti(object):
             x_beam_l = self.generative_models[l].beam_search(z, self.all_embeddings[l], beam_size, num_time_steps)  # S
             # * max(L)
 
-            x_beam_l = self.cut_off(x_beam_l, self.eos_ind)
+            x_beam_l = cut_off(x_beam_l, self.eos_ind)
 
             outputs.append(x_beam_l)
 
@@ -1213,7 +1149,7 @@ class SGVBWordsSSLMulti(object):
 
         x = T.imatrix('x')  # N * max(L)
 
-        x_embedded = self.embedder(x, self.all_embeddings[l])
+        x_embedded = embedder(x, self.all_embeddings[l])
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_only(x, x_embedded, l, 1, means_only=True)
         # N * dim(z)
@@ -1230,8 +1166,8 @@ class SGVBWordsSSLMulti(object):
         x_0 = T.imatrix('x_0')  # N * max(L)
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0,
                                                                            l_1, 1, means_only=True)  # N * dim(z)
@@ -1251,8 +1187,8 @@ class SGVBWordsSSLMulti(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_from, x_from_embedded, x_to_best_guess,
                                                                            x_to_best_guess_embedded, l_from, l_to, 1,
@@ -1260,7 +1196,7 @@ class SGVBWordsSSLMulti(object):
 
         x_to = self.generative_models[l_to].beam_search(z, self.all_embeddings[l_to], beam_size, num_time_steps)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -1275,8 +1211,8 @@ class SGVBWordsSSLMulti(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z, _ = self.recognition_model.get_samples_and_kl_std_gaussian_both(x_from, x_from_embedded, x_to_best_guess,
                                                                            x_to_best_guess_embedded, l_from, l_to,
@@ -1285,7 +1221,7 @@ class SGVBWordsSSLMulti(object):
         x_to = self.generative_models[l_to].beam_search_samples(z, self.all_embeddings[l_to], beam_size, num_samples,
                                                                 num_time_steps)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -1351,7 +1287,7 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         for l in range(self.num_langs):
 
             generative_models.append(generative_model(self.z_dim, self.max_length, self.vocab_size, self.embedding_dim,
-                                                      self.embedder, self.dist_z_gen, self.dist_x_gen,
+                                                      embedder, self.dist_z_gen, self.dist_x_gen,
                                                       self.gen_nn_kwargs))
 
         return generative_models
@@ -1370,28 +1306,6 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         l_means_and_covs = DenseLayer(l_in, self.z_dim, nonlinearity=linear, b=T.zeros)
 
         return l_means_and_covs
-
-    def embedder(self, x, all_embeddings):
-
-        all_embeddings = T.concatenate([all_embeddings, T.zeros((1, all_embeddings.shape[1]))], axis=0)
-
-        return all_embeddings[x]
-
-    def cut_off(self, x, eos_ind):
-
-        def step(x_l, x_lm1):
-
-            x_l = T.switch(T.eq(x_lm1, eos_ind), -1, x_l)
-            x_l = T.switch(T.eq(x_lm1, -1), -1, x_l)
-
-            return T.cast(x_l, 'int32')
-
-        x_cut_off, _ = theano.scan(step,
-                                   sequences=x.T,
-                                   outputs_info=T.zeros((x.shape[0],), 'int32'),
-                                   )
-
-        return x_cut_off.T
 
     def get_means_and_covs_gen(self, z_forward, z_backward):
 
@@ -1439,13 +1353,13 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         means_gen, covs_gen = self.get_means_and_covs_gen(z_forward, z_backward)
 
         kl = 0.5 * T.sum((covs_rec/covs_gen) + (((means_gen - means_rec)**2)/covs_gen) - T.ones_like(means_gen) +
-                         T.log(covs_gen/covs_rec))
+                         T.log(covs_gen/covs_rec), axis=range(1, means_rec.ndim))
 
         return kl
 
     def symbolic_elbo_only(self, l, x, num_samples, beta=None, drop_mask=None):
 
-        x_embedded = self.embedder(x, self.all_embeddings[l])  # N * max(L) * E
+        x_embedded = embedder(x, self.all_embeddings[l])  # N * max(L) * E
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_only(x, x_embedded, l, num_samples)
@@ -1471,8 +1385,8 @@ class SGVBWordsSSLMultiRecurrentZ(object):
 
     def symbolic_elbo_both(self, l_0, l_1, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, num_samples)
@@ -1600,7 +1514,7 @@ class SGVBWordsSSLMultiRecurrentZ(object):
             x_beam_l = self.generative_models[l].beam_search(z, self.all_embeddings[l], beam_size)  # S
             # * max(L)
 
-            x_beam_l = self.cut_off(x_beam_l, self.eos_ind)
+            x_beam_l = cut_off(x_beam_l, self.eos_ind)
 
             outputs.append(x_beam_l)
 
@@ -1610,7 +1524,7 @@ class SGVBWordsSSLMultiRecurrentZ(object):
 
         x = T.imatrix('x')  # N * max(L)
 
-        x_embedded = self.embedder(x, self.all_embeddings[l])
+        x_embedded = embedder(x, self.all_embeddings[l])
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_only(x, x_embedded, l, 1, means_only=True)
@@ -1629,8 +1543,8 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         x_0 = T.imatrix('x_0')  # N * max(L)
         x_1 = T.imatrix('x_1')  # N * max(L)
 
-        x_0_embedded = self.embedder(x_0, self.all_embeddings[l_0])
-        x_1_embedded = self.embedder(x_1, self.all_embeddings[l_1])
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_both(x_0, x_0_embedded, x_1, x_1_embedded, l_0, l_1, 1, means_only=True)
@@ -1652,8 +1566,8 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_both(x_from, x_from_embedded, x_to_best_guess, x_to_best_guess_embedded,
@@ -1663,7 +1577,7 @@ class SGVBWordsSSLMultiRecurrentZ(object):
 
         x_to = self.generative_models[l_to].beam_search(z, self.all_embeddings[l_to], beam_size)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -1678,8 +1592,8 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         all_embeddings_from = self.all_embeddings[l_from]
         all_embeddings_to = self.all_embeddings[l_to]
 
-        x_from_embedded = self.embedder(x_from, all_embeddings_from)  # N * max(L) * E
-        x_to_best_guess_embedded = self.embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
+        x_from_embedded = embedder(x_from, all_embeddings_from)  # N * max(L) * E
+        x_to_best_guess_embedded = embedder(x_to_best_guess, all_embeddings_to)  # N * max(L) * E
 
         z_forward, z_backward, means_rec_forward, covs_rec_forward, means_rec_backward, covs_rec_backward = \
             self.recognition_model.get_samples_both(x_from, x_from_embedded, x_to_best_guess, x_to_best_guess_embedded,
@@ -1692,7 +1606,7 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         x_to = self.generative_models[l_to].beam_search_samples(z, log_p_z, self.all_embeddings[l_to], beam_size,
                                                                 num_samples)
 
-        x_to = self.cut_off(x_to, self.eos_ind)
+        x_to = cut_off(x_to, self.eos_ind)
 
         return theano.function(inputs=[x_from, x_to_best_guess],
                                outputs=x_to,
@@ -1710,3 +1624,340 @@ class SGVBWordsSSLMultiRecurrentZ(object):
         for l in range(self.num_langs):
 
             self.generative_models[l].set_param_values(generative_models_params_vals[l])
+
+
+class SGVBWordsVNMT(object):
+
+    def __init__(self, generative_model, recognition_model, z_dim, max_length, vocab_size, embedding_dim, dist_z_gen,
+                 dist_x_1_gen, dist_z_rec, gen_nn_kwargs, rec_nn_kwargs, eos_ind):
+
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+
+        self.all_embeddings_0 = theano.shared(np.float32(np.random.normal(0., 0.1, (vocab_size, embedding_dim))))
+        self.all_embeddings_1 = theano.shared(np.float32(np.random.normal(0., 0.1, (vocab_size, embedding_dim))))
+
+        self.dist_z_gen = dist_z_gen
+        self.dist_z_rec = dist_z_rec
+        self.dist_x_1_gen = dist_x_1_gen
+
+        self.gen_nn_kwargs = gen_nn_kwargs
+        self.rec_nn_kwargs = rec_nn_kwargs
+
+        self.generative_model = self.init_generative_model(generative_model)
+
+        self.recognition_model = self.init_recognition_model(recognition_model)
+
+        self.eos_ind = eos_ind
+
+        self.params = self.generative_model.get_params() + self.recognition_model.get_params() + \
+            [self.all_embeddings_0, self.all_embeddings_1]
+
+    def init_generative_model(self, generative_model):
+
+        generative_model = generative_model(self.z_dim, self.max_length, self.vocab_size, self.embedding_dim,
+                                            embedder, self.dist_z_gen, self.dist_x_1_gen, self.gen_nn_kwargs)
+
+        return generative_model
+
+    def init_recognition_model(self, recognition_model):
+
+        recognition_model = recognition_model(self.z_dim, self.max_length, self.embedding_dim, self.dist_z_rec, 
+                                              self.rec_nn_kwargs)
+
+        return recognition_model
+
+    def symbolic_elbo(self, x_0, x_1, num_samples, beta=None, drop_mask_1=None):
+
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+
+        z, means_rec, covs_rec = self.recognition_model.get_samples_and_means_and_covs(x_0, x_0_embedded, x_1,
+                                                                                       x_1_embedded, num_samples)
+
+        kl = self.generative_model.kl(x_0, x_0_embedded, means_rec, covs_rec)  # N
+
+        if drop_mask_1 is None:
+            x_1_embedded_dropped = x_1_embedded
+        else:
+            x_1_embedded_dropped = x_1_embedded * T.shape_padright(drop_mask_1)
+
+        log_p_x_1 = self.generative_model.log_p_x_1(x_0, x_0_embedded, z, x_1, x_1_embedded, x_1_embedded_dropped,
+                                                    self.all_embeddings_1)  # (S*N)
+
+        if beta is None:
+            elbo = T.mean(log_p_x_1) - T.mean(kl)
+        else:
+            elbo = T.mean(log_p_x_1) - T.mean(beta * kl)
+
+        return elbo, T.mean(kl)
+
+    def elbo_fn(self, num_samples):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(x_0, x_1, num_samples)
+
+        elbo_fn = theano.function(inputs=[x_0, x_1],
+                                  outputs=[elbo, kl],
+                                  allow_input_downcast=True,
+                                  )
+
+        return elbo_fn
+
+    def optimiser(self, num_samples, grad_norm_constraint, update, update_kwargs, saved_update=None):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        beta = T.scalar('beta')
+
+        drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(x_0, x_1, num_samples, beta, drop_mask_1)
+
+        grads = T.grad(-elbo, self.params, disconnected_inputs='ignore')
+
+        if grad_norm_constraint is not None:
+            grads = [norm_constraint(g, grad_norm_constraint) if g.ndim > 1 else g for g in grads]
+
+        update_kwargs['loss_or_grads'] = grads
+        update_kwargs['params'] = self.params
+
+        updates = update(**update_kwargs)
+
+        if saved_update is not None:
+            for u, v in zip(updates, saved_update.keys()):
+                u.set_value(v.get_value())
+
+        optimiser = theano.function(inputs=[x_0, x_1, beta, drop_mask_1],
+                                    outputs=[elbo, kl],
+                                    updates=updates,
+                                    allow_input_downcast=True,
+                                    on_unused_input='ignore',
+                                    )
+
+        return optimiser, updates
+
+    def translate_fn(self, beam_size):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+
+        z, _ = self.generative_model.get_z_means_and_covs(x_0, x_0_embedded)  # N * dim(z)
+
+        x_1 = self.generative_model.beam_search(x_0, x_0_embedded, z, self.all_embeddings_1, beam_size)  # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )
+
+    def translate_fn_sampling(self, beam_size, num_samples):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+
+        z = self.generative_model.get_samples_z(x_0, x_0_embedded, num_samples)  # (S*N) * dim(z)
+
+        log_p_z = self.generative_model.log_p_z(z, x_0, x_0_embedded)  # (S*N)
+
+        x_1 = self.generative_model.beam_search_samples(x_0, x_0_embedded, z, log_p_z, self.all_embeddings_1, beam_size,
+                                                        num_samples)  # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )
+
+
+class SGVBWordsVNMTMultiIndicator(object):
+
+    def __init__(self, generative_model, recognition_model, num_langs, z_dim, max_length, vocab_size, embedding_dim,
+                 dist_z_gen, dist_x_1_gen, dist_z_rec, gen_nn_kwargs, rec_nn_kwargs, eos_ind):
+
+        self.num_langs = num_langs
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+
+        self.all_embeddings = theano.shared(np.float32(np.random.normal(0., 0.1, (num_langs, vocab_size,
+                                                                                  embedding_dim))))
+
+        self.dist_z_gen = dist_z_gen
+        self.dist_z_rec = dist_z_rec
+        self.dist_x_1_gen = dist_x_1_gen
+
+        self.gen_nn_kwargs = gen_nn_kwargs
+        self.rec_nn_kwargs = rec_nn_kwargs
+
+        self.generative_model = self.init_generative_model(generative_model)
+
+        self.recognition_model = self.init_recognition_model(recognition_model)
+
+        self.eos_ind = eos_ind
+
+        self.params = self.generative_model.get_params() + self.recognition_model.get_params() + [self.all_embeddings]
+
+    def init_generative_model(self, generative_model):
+
+        generative_model = generative_model(self.num_langs, self.z_dim, self.max_length, self.vocab_size,
+                                            self.embedding_dim, embedder, self.dist_z_gen, self.dist_x_1_gen,
+                                            self.gen_nn_kwargs)
+
+        return generative_model
+
+    def init_recognition_model(self, recognition_model):
+
+        recognition_model = recognition_model(self.num_langs, self.z_dim, self.max_length, self.embedding_dim,
+                                              self.dist_z_rec, self.rec_nn_kwargs)
+
+        return recognition_model
+
+    def symbolic_elbo(self, l_0, l_1, x_0, x_1, num_samples, beta=None, drop_mask_1=None):
+
+        x_0_embedded, _ = theano.scan(lambda x, l: embedder(x, self.all_embeddings[l]),
+                                      sequences=[x_0, l_0],
+                                      )
+
+        # x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
+
+        z, means_rec, covs_rec = self.recognition_model.get_samples_and_means_and_covs(l_0, l_1, x_0, x_0_embedded, x_1,
+                                                                                       x_1_embedded, num_samples)
+
+        h = self.generative_model.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        kl = self.generative_model.kl(h, x_0, means_rec, covs_rec)  # N
+
+        if drop_mask_1 is None:
+            x_1_embedded_dropped = x_1_embedded
+        else:
+            x_1_embedded_dropped = x_1_embedded * T.shape_padright(drop_mask_1)
+
+        log_p_x_1 = self.generative_model.log_p_x_1(l_1, h, z, x_1, x_1_embedded, x_1_embedded_dropped,
+                                                    self.all_embeddings[l_1])  # (S*N)
+
+        if beta is None:
+            elbo = T.mean(log_p_x_1) - T.mean(kl)
+        else:
+            elbo = T.mean(log_p_x_1) - T.mean(beta * kl)
+
+        return elbo, T.mean(kl)
+
+    def elbo_fn(self, num_samples):
+
+        l_0 = T.ivector('l_0')  # N
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(l_0, l_1, x_0, x_1, num_samples)
+
+        elbo_fn = theano.function(inputs=[l_0, l_1, x_0, x_1],
+                                  outputs=[elbo, kl],
+                                  allow_input_downcast=True,
+                                  )
+
+        return elbo_fn
+
+    def optimiser(self, num_samples, grad_norm_constraint, update, update_kwargs, saved_update=None):
+
+        l_0 = T.ivector('l_0')  # N
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        beta = T.scalar('beta')
+
+        drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(l_0, l_1, x_0, x_1, num_samples, beta, drop_mask_1)
+
+        grads = T.grad(-elbo, self.params, disconnected_inputs='ignore')
+
+        if grad_norm_constraint is not None:
+            grads = [norm_constraint(g, grad_norm_constraint) if g.ndim > 1 else g for g in grads]
+
+        update_kwargs['loss_or_grads'] = grads
+        update_kwargs['params'] = self.params
+
+        updates = update(**update_kwargs)
+
+        if saved_update is not None:
+            for u, v in zip(updates, saved_update.keys()):
+                u.set_value(v.get_value())
+
+        optimiser = theano.function(inputs=[l_0, l_1, x_0, x_1, beta, drop_mask_1],
+                                    outputs=[elbo, kl],
+                                    updates=updates,
+                                    allow_input_downcast=True,
+                                    on_unused_input='ignore',
+                                    )
+
+        return optimiser, updates
+
+    def translate_fn(self, beam_size):
+
+        l_0 = T.ivector('l_0')  # N
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        x_0_embedded, _ = theano.scan(lambda x, l: embedder(x, self.all_embeddings[l]),
+                                      sequences=[x_0, l_0],
+                                      )
+
+        # x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+
+        h = self.generative_model.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        z, _ = self.generative_model.get_z_means_and_covs(h, x_0)  # N * dim(z)
+
+        x_1 = self.generative_model.beam_search(l_0, l_1, x_0, x_0_embedded, z, self.all_embeddings[l_1], beam_size)
+        # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[l_0, l_1, x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )
+
+    def translate_fn_sampling(self, beam_size, num_samples):
+
+        l_0 = T.ivector('l_0')  # N
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        x_0_embedded, _ = theano.scan(lambda x, l: embedder(x, self.all_embeddings[l]),
+                                      sequences=[x_0, l_0],
+                                      )
+
+        # x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+
+        h = self.generative_model.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        z = self.generative_model.get_samples_z(h, x_0, num_samples)  # (S*N) * dim(z)
+
+        log_p_z = self.generative_model.log_p_z(z, l_0, x_0, x_0_embedded)  # (S*N)
+
+        x_1 = self.generative_model.beam_search_samples(l_0, l_1, x_0, x_0_embedded, z, log_p_z,
+                                                        self.all_embeddings[l_1], beam_size, num_samples)  # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[l_0, l_1, x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )

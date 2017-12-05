@@ -470,6 +470,340 @@ class RecRNNSplitForwardBackwardFinalMultipleLatents(RecRNNSplitForwardBackwardF
         set_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]), nn_params_vals)
 
 
+class RecRNNSplitForwardBackward(object):
+
+    def __init__(self, z_dim, max_length, embedding_dim, dist_z, nn_kwargs):
+
+        self.z_dim = z_dim
+
+        self.max_length = max_length
+
+        self.embedding_dim = embedding_dim
+
+        self.dist_z = dist_z()
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn_nn_depth = nn_kwargs['nn_depth']
+        self.nn_nn_hid_units = nn_kwargs['nn_hid_units']
+        self.nn_nn_hid_nonlinearity = nn_kwargs['nn_hid_nonlinearity']
+
+        self.rnn = self.rnn_fn()
+        self.mean_nn, self.cov_nn = self.nn_fn()
+
+    def rnn_fn(self):
+
+        l_in_0 = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_mask_0 = InputLayer((None, self.max_length))
+
+        l_forward_0 = LSTMLayer(l_in_0, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_0,
+                                nonlinearity=self.nn_rnn_hid_nonlinearity)
+
+        l_backward_0 = LSTMLayer(l_in_0, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_0,
+                                 nonlinearity=self.nn_rnn_hid_nonlinearity, backwards=True)
+
+        l_in_1 = InputLayer((None, self.max_length, self.embedding_dim))
+
+        l_mask_1 = InputLayer((None, self.max_length))
+
+        l_forward_1 = LSTMLayer(l_in_1, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_1,
+                                nonlinearity=self.nn_rnn_hid_nonlinearity)
+
+        l_backward_1 = LSTMLayer(l_in_1, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_1,
+                                 nonlinearity=self.nn_rnn_hid_nonlinearity, backwards=True)
+
+        return [l_forward_0, l_backward_0, l_forward_1, l_backward_1]
+
+    def nn_fn(self):
+
+        l_in = InputLayer((None, 2 * self.nn_rnn_hid_units))
+
+        l_prev = l_in
+
+        for h in range(self.nn_nn_depth):
+
+            l_prev = DenseLayer(l_prev, num_units=self.nn_nn_hid_units, nonlinearity=self.nn_nn_hid_nonlinearity)
+
+        mean_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=linear)
+
+        cov_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=elu_plus_one)
+
+        return mean_nn, cov_nn
+
+    def get_hid(self, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+
+        h_forward_0 = self.rnn[0].get_output_for([x_0_embedded, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_backward_0 = self.rnn[1].get_output_for([x_0_embedded, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_0 = T.concatenate([h_forward_0, h_backward_0], axis=-1)  # N * max(L) * dim(hid)
+
+        h_forward_1 = self.rnn[2].get_output_for([x_1_embedded, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_backward_1 = self.rnn[3].get_output_for([x_1_embedded, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_1 = T.concatenate([h_forward_1, h_backward_1], axis=-1)  # N * max(L) * dim(hid)
+
+        return T.concatenate([h_0, h_1], axis=-1)  # N * max(L) * (2*dim(hid))
+
+    def get_means_and_covs(self, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        N = x_0.shape[0]
+
+        hid = self.get_hid(x_0, x_0_embedded, x_1, x_1_embedded)  # N * max(L) * (2*dim(hid))
+
+        means = get_output(self.mean_nn, hid.reshape((N*self.max_length, 2*self.nn_rnn_hid_units)))  # (N*max(L)) *
+        # dim(z)
+        covs = get_output(self.cov_nn, hid.reshape((N*self.max_length, 2*self.nn_rnn_hid_units)))  # (N*max(L)) * dim(z)
+
+        means = means.reshape((N, self.max_length, self.z_dim))
+        covs = covs.reshape((N, self.max_length, self.z_dim))
+
+        return means, covs
+
+    def get_samples_and_means_and_covs(self, x_0, x_0_embedded, x_1, x_1_embedded, num_samples, means_only=False):
+
+        means, covs = self.get_means_and_covs(x_0, x_0_embedded, x_1, x_1_embedded)
+
+        if means_only:
+            samples = T.tile(means, [num_samples] + [1]*(means.ndim - 1))  # (S*N) * dim(z)
+        else:
+            samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * dim(z)
+
+        return samples, means, covs
+
+    def get_params(self):
+
+        rnn_params = get_all_params(get_all_layers(self.rnn), trainable=True)
+        nn_params = get_all_params(get_all_layers([self.mean_nn, self.cov_nn]), trainable=True)
+
+        return rnn_params + nn_params
+
+    def get_param_values(self):
+
+        nn_params_vals = get_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]))
+        rnn_params_vals = get_all_param_values(get_all_layers(self.rnn))
+
+        return [rnn_params_vals, nn_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_params_vals, nn_params_vals] = param_values
+
+        set_all_param_values(get_all_layers(self.rnn), rnn_params_vals)
+        set_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]), nn_params_vals)
+
+
+class RecRNNSplitForwardBackwardMean(RecRNNSplitForwardBackward):
+
+    def get_hid(self, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+
+        h_forward_0 = self.rnn[0].get_output_for([x_0_embedded, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_backward_0 = self.rnn[1].get_output_for([x_0_embedded, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_0 = T.concatenate([h_forward_0, h_backward_0], axis=-1)  # N * max(L) * dim(hid)
+
+        h_0_avg = T.sum(h_0, axis=1) / T.shape_padright(T.sum(mask_0, axis=1))  # N * dim(hid)
+
+        h_forward_1 = self.rnn[2].get_output_for([x_1_embedded, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_backward_1 = self.rnn[3].get_output_for([x_1_embedded, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_1 = T.concatenate([h_forward_1, h_backward_1], axis=-1)  # N * max(L) * dim(hid)
+
+        h_1_avg = T.sum(h_1, axis=1) / T.shape_padright(T.sum(mask_1, axis=1))  # N * dim(hid)
+
+        return T.concatenate([h_0_avg, h_1_avg], axis=-1)  # N * (2*dim(hid))
+
+    def get_means_and_covs(self, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        hid = self.get_hid(x_0, x_0_embedded, x_1, x_1_embedded)  # N * (2*dim(hid))
+
+        means = get_output(self.mean_nn, hid)  # N * dim(z)
+        covs = get_output(self.cov_nn, hid)  # N * dim(z)
+
+        return means, covs
+
+
+class RecRNNSplitForwardBackwardMutliIndicator(object):
+
+    def __init__(self, num_langs, z_dim, max_length, embedding_dim, dist_z, nn_kwargs):
+
+        self.num_langs = num_langs
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.embedding_dim = embedding_dim
+
+        self.dist_z = dist_z()
+
+        self.nn_rnn_hid_units = nn_kwargs['rnn_hid_units']
+        self.nn_rnn_hid_nonlinearity = nn_kwargs['rnn_hid_nonlinearity']
+
+        self.nn_nn_depth = nn_kwargs['nn_depth']
+        self.nn_nn_hid_units = nn_kwargs['nn_hid_units']
+        self.nn_nn_hid_nonlinearity = nn_kwargs['nn_hid_nonlinearity']
+
+        self.rnn = self.rnn_fn()
+        self.mean_nn, self.cov_nn = self.nn_fn()
+
+    def rnn_fn(self):
+
+        l_in_0 = InputLayer((None, self.max_length, self.embedding_dim + self.num_langs))
+
+        l_mask_0 = InputLayer((None, self.max_length))
+
+        l_forward_0 = LSTMLayer(l_in_0, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_0,
+                                nonlinearity=self.nn_rnn_hid_nonlinearity)
+
+        l_backward_0 = LSTMLayer(l_in_0, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_0,
+                                 nonlinearity=self.nn_rnn_hid_nonlinearity, backwards=True)
+
+        l_in_1 = InputLayer((None, self.max_length, self.embedding_dim + self.num_langs))
+
+        l_mask_1 = InputLayer((None, self.max_length))
+
+        l_forward_1 = LSTMLayer(l_in_1, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_1,
+                                nonlinearity=self.nn_rnn_hid_nonlinearity)
+
+        l_backward_1 = LSTMLayer(l_in_1, num_units=int(self.nn_rnn_hid_units/2), mask_input=l_mask_1,
+                                 nonlinearity=self.nn_rnn_hid_nonlinearity, backwards=True)
+
+        return [l_forward_0, l_backward_0, l_forward_1, l_backward_1]
+
+    def nn_fn(self):
+
+        l_in = InputLayer((None, 2 * self.nn_rnn_hid_units))
+
+        l_prev = l_in
+
+        for h in range(self.nn_nn_depth):
+
+            l_prev = DenseLayer(l_prev, num_units=self.nn_nn_hid_units, nonlinearity=self.nn_nn_hid_nonlinearity)
+
+        mean_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=linear)
+
+        cov_nn = DenseLayer(l_prev, num_units=self.z_dim, nonlinearity=elu_plus_one)
+
+        return mean_nn, cov_nn
+
+    def get_hid(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        N = x_0.shape[0]
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+
+        l_0_one_hot = T.extra_ops.to_one_hot(l_0, self.num_langs)  # N * num_l
+        l_0_rep = T.tile(T.shape_padaxis(l_0_one_hot, 1), (1, self.max_length, 1))  # N * max(L) * num_l
+
+        l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        rnn_input_0 = T.concatenate((x_0_embedded, l_0_rep), axis=-1)  # N * max(L) * (E + num_l)
+        rnn_input_1 = T.concatenate((x_1_embedded, l_1_rep), axis=-1)  # N * max(L) * (E + num_l)
+
+        h_forward_0 = self.rnn[0].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_backward_0 = self.rnn[1].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_0 = T.concatenate([h_forward_0, h_backward_0], axis=-1)  # N * max(L) * dim(hid)
+
+        h_forward_1 = self.rnn[2].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_backward_1 = self.rnn[3].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_1 = T.concatenate([h_forward_1, h_backward_1], axis=-1)  # N * max(L) * dim(hid)
+
+        return T.concatenate([h_0, h_1], axis=1)  # N * max(L) * (2*dim(hid))
+
+    def get_means_and_covs(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        N = x_0.shape[0]
+
+        hid = self.get_hid(l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded)  # N * max(L) * (2*dim(hid))
+
+        means = get_output(self.mean_nn, hid.reshape((N*self.max_length, 2*self.nn_rnn_hid_units)))  # (N*max(L)) *
+        # dim(z)
+        covs = get_output(self.cov_nn, hid.reshape((N*self.max_length, 2*self.nn_rnn_hid_units)))  # (N*max(L)) * dim(z)
+
+        means = means.reshape((N, self.max_length, self.z_dim))
+        covs = covs.reshape((N, self.max_length, self.z_dim))
+
+        return means, covs
+
+    def get_samples_and_means_and_covs(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded, num_samples,
+                                       means_only=False):
+
+        means, covs = self.get_means_and_covs(l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded)
+
+        if means_only:
+            samples = T.tile(means, [num_samples] + [1]*(means.ndim - 1))  # (S*N) * max(L) * dim(z)
+        else:
+            samples = self.dist_z.get_samples(num_samples, [means, covs])  # (S*N) * max(L) * dim(z)
+
+        return samples, means, covs
+
+    def get_params(self):
+
+        rnn_params = get_all_params(get_all_layers(self.rnn), trainable=True)
+        nn_params = get_all_params(get_all_layers([self.mean_nn, self.cov_nn]), trainable=True)
+
+        return rnn_params + nn_params
+
+    def get_param_values(self):
+
+        nn_params_vals = get_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]))
+        rnn_params_vals = get_all_param_values(get_all_layers(self.rnn))
+
+        return [rnn_params_vals, nn_params_vals]
+
+    def set_param_values(self, param_values):
+
+        [rnn_params_vals, nn_params_vals] = param_values
+
+        set_all_param_values(get_all_layers(self.rnn), rnn_params_vals)
+        set_all_param_values(get_all_layers([self.mean_nn, self.cov_nn]), nn_params_vals)
+
+
+class RecRNNSplitForwardBackwardMeanMutliIndicator(RecRNNSplitForwardBackwardMutliIndicator):
+
+    def get_hid(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        N = x_0.shape[0]
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+
+        l_0_one_hot = T.extra_ops.to_one_hot(l_0, self.num_langs)  # N * num_l
+        l_0_rep = T.tile(T.shape_padaxis(l_0_one_hot, 1), (1, self.max_length, 1))  # N * max(L) * num_l
+
+        l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        rnn_input_0 = T.concatenate((x_0_embedded, l_0_rep), axis=-1)  # N * max(L) * (E + num_l)
+        rnn_input_1 = T.concatenate((x_1_embedded, l_1_rep), axis=-1)  # N * max(L) * (E + num_l)
+
+        h_forward_0 = self.rnn[0].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_backward_0 = self.rnn[1].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_0 = T.concatenate([h_forward_0, h_backward_0], axis=-1)  # N * max(L) * dim(hid)
+
+        h_0_avg = T.sum(h_0, axis=1) / T.shape_padright(T.sum(mask_0, axis=1))  # N * dim(hid)
+
+        h_forward_1 = self.rnn[2].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_backward_1 = self.rnn[3].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_1 = T.concatenate([h_forward_1, h_backward_1], axis=-1)  # N * max(L) * dim(hid)
+
+        h_1_avg = T.sum(h_1, axis=1) / T.shape_padright(T.sum(mask_1, axis=1))  # N * dim(hid)
+
+        return T.concatenate([h_0_avg, h_1_avg], axis=-1)  # N * (2*dim(hid))
+
+    def get_means_and_covs(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        hid = self.get_hid(l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded)  # N * (2*dim(hid))
+
+        means = get_output(self.mean_nn, hid)  # N * dim(z)
+        covs = get_output(self.cov_nn, hid)  # N * dim(z)
+
+        return means, covs
+
+
 class RecRNNSplitForwardBackwardAttention(RecModel):
 
     def __init__(self, z_dim, max_length_0, max_length_1, embedding_dim_0, embedding_dim_1, dist_z, nn_kwargs):
