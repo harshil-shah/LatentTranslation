@@ -6,7 +6,7 @@ import time
 import numpy as np
 import json
 from lasagne.updates import adam
-# from data_processing.utilities import chunker
+from data_processing.utilities import chunker
 
 
 class RunWords(object):
@@ -2932,8 +2932,8 @@ class RunVNMT(object):
 
         start = time.clock()
 
-        self.x_0_train, self.x_1_train, self.x_0_test, self.x_1_test, self.L_0_train, self.L_1_train, self.L_0_test, \
-            self.L_1_test = self.load_data(dataset)
+        self.x_0_train, self.x_1_train, self.x_0_val, self.x_1_val, self.x_0_test, self.x_1_test, self.L_0_train, \
+            self.L_1_train, self.L_0_val, self.L_1_val, self.L_0_test, self.L_1_test = self.load_data(dataset)
 
         print('data loaded; time taken = ' + str(time.clock() - start) + ' seconds')
 
@@ -2958,21 +2958,21 @@ class RunVNMT(object):
             with open(os.path.join(self.load_param_dir, 'encoder_params.save'), 'rb') as f:
                 self.solver.recognition_model.set_param_values(cPickle.load(f))
 
-    def save_params(self, updates):
+    def save_params(self, updates, suffix=''):
 
-        with open(os.path.join(self.out_dir, 'all_embeddings_0.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'all_embeddings_0' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.all_embeddings_0.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'all_embeddings_1.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'all_embeddings_1' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.all_embeddings_1.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'decoder_params.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'decoder_params' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.generative_model.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'encoder_params.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'encoder_params' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.recognition_model.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'updates' + suffix + '.save'), 'wb') as f:
             cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
 
     def load_words(self, folder, files, load_batch_size):
@@ -3017,12 +3017,18 @@ class RunVNMT(object):
         folder = '../_datasets/' + dataset
 
         files_0_train = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_0)
-                                and not f.endswith('test.txt')
+                                and not f.endswith('test.txt') and not f.endswith('val.txt')
                                 and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
 
         files_1_train = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_1)
-                                and not f.endswith('test.txt')
+                                and not f.endswith('test.txt') and not f.endswith('val.txt')
                                 and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        files_0_val = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_0)
+                              and f.endswith('val.txt') and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
+
+        files_1_val = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_1)
+                              and f.endswith('val.txt') and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
 
         files_0_test = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + self.l_0)
                                and f.endswith('test.txt') and (self.l_0 + self.l_1 in f or self.l_1 + self.l_0 in f)])
@@ -3032,10 +3038,13 @@ class RunVNMT(object):
 
         x_0_train, L_0_train = self.load_words(folder, files_0_train, load_batch_size)
         x_1_train, L_1_train = self.load_words(folder, files_1_train, load_batch_size)
+        x_0_val, L_0_val = self.load_words(folder, files_0_val, load_batch_size)
+        x_1_val, L_1_val = self.load_words(folder, files_1_val, load_batch_size)
         x_0_test, L_0_test = self.load_words(folder, files_0_test, load_batch_size)
         x_1_test, L_1_test = self.load_words(folder, files_1_test, load_batch_size)
 
-        return x_0_train, x_1_train, x_0_test, x_1_test, L_0_train, L_1_train, L_0_test, L_1_test
+        return x_0_train, x_1_train, x_0_val, x_1_val, x_0_test, x_1_test, L_0_train, L_1_train, L_0_val, L_1_val, \
+            L_0_test, L_1_test
 
     def call_translation_fn(self, translation_fn, x_in, x_out_true):
 
@@ -3081,8 +3090,9 @@ class RunVNMT(object):
         return drop_mask
 
     def train(self, n_iter, batch_size, num_samples, word_drop=None, grad_norm_constraint=None, update=adam,
-              update_kwargs=None, warm_up=None, val_freq=None, val_batch_size=0, val_num_samples=0, val_print_gen=5,
-              val_beam_size=15, save_params_every=None):
+              update_kwargs=None, warm_up=None, early_stopping_freq=None, early_stopping_num_samples=5,
+              early_stopping_patience=5, print_freq=None, print_batch_size=5, print_beam_size=15,
+              save_params_every=None):
 
         if self.pre_trained:
             with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
@@ -3095,9 +3105,13 @@ class RunVNMT(object):
                                                    update=update, update_kwargs=update_kwargs,
                                                    saved_update=saved_update)
 
-        elbo_fn = self.solver.elbo_fn(val_num_samples)
+        elbo_fn = self.solver.elbo_fn(early_stopping_num_samples)
 
-        translation_fn = self.solver.translate_fn(val_beam_size)
+        translation_fn = self.solver.translate_fn(print_beam_size)
+
+        val_elbo_best = -np.inf
+        early_stopping_done = False
+        early_stopping_evals_wo_improv = 0
 
         for i in range(n_iter):
 
@@ -3120,23 +3134,41 @@ class RunVNMT(object):
             print('Iteration ' + str(i + 1) + ': ELBO = ' + str(elbo) + ' (KL = ' + str(kl) +
                   ') per data point (time taken = ' + str(time.clock() - start) + ' seconds)')
 
-            if val_freq is not None and i % val_freq == 0:
+            if print_freq is not None and i % print_freq == 0:
 
-                val_batch_indices = np.random.choice(len(self.x_0_test), val_batch_size)
-                val_batch_l_0 = self.x_0_test[val_batch_indices]
-                val_batch_l_1 = self.x_1_test[val_batch_indices]
-
-                val_elbo, val_kl = elbo_fn(val_batch_l_0, val_batch_l_1)
-
-                print('Test set ELBO = ' + str(val_elbo) + ' (KL = ' + str(kl) + ') per data point')
-
-                translation_batch_indices = np.random.choice(len(self.x_0_test), val_print_gen)
-                translation_batch_l_0 = self.x_0_test[translation_batch_indices]
-                translation_batch_l_1 = self.x_1_test[translation_batch_indices]
+                translation_batch_indices = np.random.choice(len(self.x_0_val), print_batch_size)
+                translation_batch_l_0 = self.x_0_val[translation_batch_indices]
+                translation_batch_l_1 = self.x_1_val[translation_batch_indices]
 
                 translations = self.call_translation_fn(translation_fn, translation_batch_l_0, translation_batch_l_1)
 
                 self.print_translations(translations)
+
+            if early_stopping_freq is not None and i % early_stopping_freq == 0:
+
+                val_elbo = 0
+                val_kl = 0
+
+                for val_batch_l_0, val_batch_l_1 in chunker([self.x_0_val, self.x_1_val], 200):
+
+                    val_elbo_batch, val_kl_batch = elbo_fn(val_batch_l_0, val_batch_l_1)
+
+                    val_elbo += val_elbo_batch * len(val_batch_l_0)
+                    val_kl += val_kl_batch * len(val_batch_l_0)
+
+                val_elbo /= len(self.x_0_val)
+                val_kl /= len(self.x_0_val)
+
+                print('Test set ELBO = ' + str(val_elbo) + ' (KL = ' + str(val_kl) + ') per data point')
+
+                if val_elbo > val_elbo_best:
+                    val_elbo_best = val_elbo
+                    early_stopping_evals_wo_improv = 0
+                else:
+                    early_stopping_evals_wo_improv += 1
+                    if not early_stopping_done and early_stopping_evals_wo_improv > early_stopping_patience:
+                        self.save_params(updates, suffix='_early_stopping_' + str(i))
+                        early_stopping_done = True
 
             if save_params_every is not None and i % save_params_every == 0 and i > 0:
 
@@ -3187,7 +3219,8 @@ class RunVNMTMultiIndicator(object):
 
         start = time.clock()
 
-        self.x_only, self.x_both, self.x_test, self.L_only, self.L_both, self.L_test = self.load_data(dataset)
+        self.x_only, self.x_both, self.x_val, self.x_test, self.L_only, self.L_both, self.L_val, self.L_test = \
+            self.load_data(dataset)
 
         print('data loaded; time taken = ' + str(time.clock() - start) + ' seconds')
 
@@ -3215,18 +3248,18 @@ class RunVNMTMultiIndicator(object):
             with open(os.path.join(self.load_param_dir, 'recog_params.save'), 'rb') as f:
                 self.solver.recognition_model.set_param_values(cPickle.load(f))
 
-    def save_params(self, updates):
+    def save_params(self, updates, suffix=''):
 
-        with open(os.path.join(self.out_dir, 'all_embeddings.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'all_embeddings' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.all_embeddings.get_value(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'gen_params.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'gen_params' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.generative_model.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'recog_params.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'recog_params' + suffix + '.save'), 'wb') as f:
             cPickle.dump(self.solver.recognition_model.get_param_values(), f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-        with open(os.path.join(self.out_dir, 'updates.save'), 'wb') as f:
+        with open(os.path.join(self.out_dir, 'updates' + suffix + '.save'), 'wb') as f:
             cPickle.dump(updates, f, protocol=cPickle.HIGHEST_PROTOCOL)
 
     def load_words(self, folder, files, load_batch_size):
@@ -3239,7 +3272,7 @@ class RunVNMTMultiIndicator(object):
 
         L = np.array([len(w) for w in words])
 
-        max_L = max(L)
+        max_L = self.max_length
 
         word_arrays = []
 
@@ -3288,6 +3321,9 @@ class RunVNMTMultiIndicator(object):
         x_both = {}
         L_both = {}
 
+        x_val = {}
+        L_val = {}
+
         x_test = {}
         L_test = {}
 
@@ -3299,17 +3335,32 @@ class RunVNMTMultiIndicator(object):
             l_1 = self.langs[pair[1]]
 
             files_both_l_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_0)
-                                     and not f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+                                     and not f.endswith('test.txt') and not f.endswith('val.txt')
+                                     and (l_0 + l_1 in f or l_1 + l_0 in f)])
 
             x_both_l_0, L_both_l_0 = self.load_words(folder, files_both_l_0, load_batch_size)
 
             files_both_l_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_1)
-                                     and not f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+                                     and not f.endswith('test.txt') and not f.endswith('val.txt')
+                                     and (l_0 + l_1 in f or l_1 + l_0 in f)])
 
             x_both_l_1, L_both_l_1 = self.load_words(folder, files_both_l_1, load_batch_size)
 
             x_both[pair] = (x_both_l_0, x_both_l_1)
             L_both[pair] = (L_both_l_0, L_both_l_1)
+
+            files_val_l_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_0)
+                                    and f.endswith('val.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_val_l_0, L_val_l_0 = self.load_words(folder, files_val_l_0, load_batch_size)
+
+            files_val_l_1 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_1)
+                                    and f.endswith('val.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
+
+            x_val_l_1, L_val_l_1 = self.load_words(folder, files_val_l_1, load_batch_size)
+
+            x_val[pair] = (x_val_l_0, x_val_l_1)
+            L_val[pair] = (L_val_l_0, L_val_l_1)
 
             files_test_l_0 = sorted([f for f in os.listdir(folder) if f.startswith('sentences_' + l_0)
                                      and f.endswith('test.txt') and (l_0 + l_1 in f or l_1 + l_0 in f)])
@@ -3324,7 +3375,7 @@ class RunVNMTMultiIndicator(object):
             x_test[pair] = (x_test_l_0, x_test_l_1)
             L_test[pair] = (L_test_l_0, L_test_l_1)
 
-        return x_only, x_both, x_test, L_only, L_both, L_test
+        return x_only, x_both, x_val, x_test, L_only, L_both, L_val, L_test
 
     def call_translation_fn(self, translation_fn, l_in, l_out, x_in, x_out_true):
 
@@ -3376,8 +3427,9 @@ class RunVNMTMultiIndicator(object):
         return drop_mask
 
     def train(self, n_iter, only_batch_size, both_batch_size, num_samples, ssl=True, word_drop=None,
-              grad_norm_constraint=None, update=adam, update_kwargs=None, warm_up=None, val_freq=None, val_batch_size=0,
-              val_num_samples=0, val_print_gen=5, val_beam_size=15, save_params_every=None):
+              grad_norm_constraint=None, update=adam, update_kwargs=None, warm_up=None, early_stopping_freq=None,
+              early_stopping_num_samples=5, early_stopping_patience=5, print_freq=None, print_batch_size=5,
+              print_beam_size=15, save_params_every=None):
 
         if self.pre_trained:
             with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
@@ -3390,9 +3442,13 @@ class RunVNMTMultiIndicator(object):
                                                    update=update, update_kwargs=update_kwargs,
                                                    saved_update=saved_update)
 
-        elbo_fn = self.solver.elbo_fn(val_num_samples)
+        elbo_fn = self.solver.elbo_fn(early_stopping_num_samples)
 
-        translation_fn = self.solver.translate_fn(val_beam_size)
+        translation_fn = self.solver.translate_fn(print_beam_size)
+
+        val_elbo_best = -np.inf
+        early_stopping_done = False
+        early_stopping_evals_wo_improv = 0
 
         for i in range(n_iter):
 
@@ -3473,29 +3529,11 @@ class RunVNMTMultiIndicator(object):
                       ' (KL = ' + str(kl_only_l) + ') per data point (time taken = ' + str(time.clock() - start) +
                       ' seconds)')
 
-            if val_freq is not None and i % val_freq == 0:
+            if print_freq is not None and i % print_freq == 0:
 
                 for pair in combinations(range(self.num_langs), 2):
 
-                    val_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), val_batch_size)
-                    val_batch_l_0 = self.x_test[pair][0][val_batch_indices_l]
-                    val_batch_l_1 = self.x_test[pair][1][val_batch_indices_l]
-
-                    val_elbo_0_to_1, val_kl_0_to_1 = elbo_fn(np.array([pair[0]]*val_batch_size), pair[1], val_batch_l_0,
-                                                             val_batch_l_1)
-
-                    print('Test set ELBO ' + self.langs[pair[0]] + ' to ' + self.langs[pair[1]] + ' = ' +
-                          str(val_elbo_0_to_1) + ' (KL = ' + str(val_kl_0_to_1) + ') per data point')
-
-                    val_elbo_1_to_0, val_kl_1_to_0 = elbo_fn(np.array([pair[1]]*val_batch_size), pair[0], val_batch_l_1,
-                                                             val_batch_l_0)
-
-                    print('Test set ELBO ' + self.langs[pair[1]] + ' to ' + self.langs[pair[0]] + ' = ' +
-                          str(val_elbo_1_to_0) + ' (KL = ' + str(val_kl_1_to_0) + ') per data point')
-
-                for pair in combinations(range(self.num_langs), 2):
-
-                    translation_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), val_print_gen)
+                    translation_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), print_batch_size)
                     translation_batch_l_0 = self.x_test[pair][0][translation_batch_indices_l]
                     translation_batch_l_1 = self.x_test[pair][1][translation_batch_indices_l]
 
@@ -3508,6 +3546,64 @@ class RunVNMTMultiIndicator(object):
                                                                    translation_batch_l_1, translation_batch_l_0)
 
                     self.print_translations(translations_1_to_0, pair[1], pair[0])
+
+            if early_stopping_freq is not None and i % early_stopping_freq == 0:
+
+                val_elbo = 0
+                val_kl = 0
+
+                for pair in combinations(range(self.num_langs), 2):
+
+                    val_elbo_0_to_1 = 0
+                    val_kl_0_to_1 = 0
+
+                    val_elbo_1_to_0 = 0
+                    val_kl_1_to_0 = 0
+
+                    for val_batch_l_0, val_batch_l_1 in chunker([self.x_val[pair][0], self.x_val[pair][1]], 200):
+
+                        val_elbo_0_to_1_batch, val_kl_0_to_1_batch = elbo_fn(np.array([pair[0]]*len(val_batch_l_0)),
+                                                                             pair[1], val_batch_l_0, val_batch_l_1)
+
+                        val_elbo_0_to_1 += val_elbo_0_to_1_batch * len(val_batch_l_0)
+                        val_kl_0_to_1 += val_kl_0_to_1_batch * len(val_batch_l_0)
+
+                        val_elbo_1_to_0_batch, val_kl_1_to_0_batch = elbo_fn(np.array([pair[1]]*len(val_batch_l_1)),
+                                                                             pair[0], val_batch_l_1, val_batch_l_0)
+
+                        val_elbo_1_to_0 += val_elbo_1_to_0_batch * len(val_batch_l_0)
+                        val_kl_1_to_0 += val_kl_1_to_0_batch * len(val_batch_l_0)
+
+                    val_elbo_0_to_1 /= len(self.x_val[pair][0])
+                    val_kl_0_to_1 /= len(self.x_val[pair][0])
+                    val_elbo_1_to_0 /= len(self.x_val[pair][0])
+                    val_kl_1_to_0 /= len(self.x_val[pair][0])
+
+                    print('Test set ELBO ' + self.langs[pair[0]] + ' to ' + self.langs[pair[1]] + ' = ' +
+                          str(val_elbo_0_to_1) + ' (KL = ' + str(val_kl_0_to_1) + ') per data point')
+
+                    val_elbo += val_elbo_0_to_1
+                    val_kl += val_kl_0_to_1
+
+                    print('Test set ELBO ' + self.langs[pair[1]] + ' to ' + self.langs[pair[0]] + ' = ' +
+                          str(val_elbo_1_to_0) + ' (KL = ' + str(val_kl_1_to_0) + ') per data point')
+
+                    val_elbo += val_elbo_1_to_0
+                    val_kl += val_kl_1_to_0
+
+                val_elbo /= len(list(combinations(range(self.num_langs), 2))) * 2
+                val_kl /= len(list(combinations(range(self.num_langs), 2))) * 2
+
+                print('Test set ELBO average = ' + str(val_elbo) + ' (KL = ' + str(val_kl) + ') per data point')
+
+                if val_elbo > val_elbo_best:
+                    val_elbo_best = val_elbo
+                    early_stopping_evals_wo_improv = 0
+                else:
+                    early_stopping_evals_wo_improv += 1
+                    if not early_stopping_done and early_stopping_evals_wo_improv > early_stopping_patience:
+                        self.save_params(updates, suffix='_early_stopping_' + str(i))
+                        early_stopping_done = True
 
             if save_params_every is not None and i % save_params_every == 0 and i > 0:
 
