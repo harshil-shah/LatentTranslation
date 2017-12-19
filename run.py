@@ -3124,12 +3124,15 @@ class RunVNMT(object):
             beta = 1. if warm_up is None or i > warm_up else float(i) / warm_up
 
             if word_drop is not None:
+                L_0 = self.L_0_train[batch_indices]
+                drop_mask_0 = self.make_drop_mask(word_drop, L_0)
                 L_1 = self.L_1_train[batch_indices]
                 drop_mask_1 = self.make_drop_mask(word_drop, L_1)
             else:
+                drop_mask_0 = np.ones_like(batch_0, dtype='float32')
                 drop_mask_1 = np.ones_like(batch_1, dtype='float32')
 
-            elbo, kl = optimiser(batch_0, batch_1, beta, drop_mask_1)
+            elbo, kl = optimiser(batch_0, batch_1, beta, drop_mask_0, drop_mask_1)
 
             print('Iteration ' + str(i + 1) + ': ELBO = ' + str(elbo) + ' (KL = ' + str(kl) +
                   ') per data point (time taken = ' + str(time.clock() - start) + ' seconds)')
@@ -3461,6 +3464,7 @@ class RunVNMTMultiIndicator(object):
                 ls_l_0 = []
                 batches_l_0 = []
                 batches_l_1 = []
+                drop_masks_l_0 = []
                 drop_masks_l_1 = []
 
                 for l_0 in range(self.num_langs):
@@ -3483,6 +3487,7 @@ class RunVNMTMultiIndicator(object):
                             else:
                                 drop_mask_only_l = np.ones_like(batch_only_l)
 
+                            drop_masks_l_0.append(drop_mask_only_l)
                             drop_masks_l_1.append(drop_mask_only_l)
 
                     else:
@@ -3508,22 +3513,29 @@ class RunVNMTMultiIndicator(object):
 
                         if word_drop is not None:
                             if min_l == l_0:
+                                L_both_l_0 = self.L_both[pair][0][batch_indices_both]
                                 L_both_l_1 = self.L_both[pair][1][batch_indices_both]
                             else:
+                                L_both_l_0 = self.L_both[pair][1][batch_indices_both]
                                 L_both_l_1 = self.L_both[pair][0][batch_indices_both]
+                            drop_mask_both_l_0 = self.make_drop_mask(word_drop, L_both_l_0)
                             drop_mask_both_l_1 = self.make_drop_mask(word_drop, L_both_l_1)
                         else:
+                            drop_mask_both_l_0 = np.ones_like(batch_both_l_0)
                             drop_mask_both_l_1 = np.ones_like(batch_both_l_1)
 
+                        drop_masks_l_0.append(drop_mask_both_l_0)
                         drop_masks_l_1.append(drop_mask_both_l_1)
 
                 ls_l_0 = np.concatenate(ls_l_0, axis=0)
 
                 batches_l_0 = np.concatenate(batches_l_0, axis=0)
                 batches_l_1 = np.concatenate(batches_l_1, axis=0)
+                drop_masks_l_0 = np.concatenate(drop_masks_l_0, axis=0)
                 drop_masks_l_1 = np.concatenate(drop_masks_l_1, axis=0)
 
-                elbo_only_l, kl_only_l = optimiser(ls_l_0, l_1, batches_l_0, batches_l_1, beta, drop_masks_l_1)
+                elbo_only_l, kl_only_l = optimiser(ls_l_0, l_1, batches_l_0, batches_l_1, beta, drop_masks_l_0,
+                                                   drop_masks_l_1)
 
                 print('Iteration ' + str(i + 1) + ' all to ' + self.langs[l_1] + ': ELBO = ' + str(elbo_only_l) +
                       ' (KL = ' + str(kl_only_l) + ') per data point (time taken = ' + str(time.clock() - start) +

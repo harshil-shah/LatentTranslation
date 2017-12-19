@@ -1715,6 +1715,7 @@ class SGVBWordsVNMT(object):
 
         beta = T.scalar('beta')
 
+        drop_mask_0 = T.matrix('drop_mask_0')  # N * max(L) - unused
         drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
 
         elbo, kl = self.symbolic_elbo(x_0, x_1, num_samples, beta, drop_mask_1)
@@ -1733,7 +1734,7 @@ class SGVBWordsVNMT(object):
             for u, v in zip(updates, saved_update.keys()):
                 u.set_value(v.get_value())
 
-        optimiser = theano.function(inputs=[x_0, x_1, beta, drop_mask_1],
+        optimiser = theano.function(inputs=[x_0, x_1, beta, drop_mask_0, drop_mask_1],
                                     outputs=[elbo, kl],
                                     updates=updates,
                                     allow_input_downcast=True,
@@ -1881,6 +1882,7 @@ class SGVBWordsVNMTMultiIndicator(object):
 
         beta = T.scalar('beta')
 
+        drop_mask_0 = T.matrix('drop_mask_0')  # N * max(L) - unused
         drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
 
         elbo, kl = self.symbolic_elbo(l_0, l_1, x_0, x_1, num_samples, beta, drop_mask_1)
@@ -1899,7 +1901,7 @@ class SGVBWordsVNMTMultiIndicator(object):
             for u, v in zip(updates, saved_update.keys()):
                 u.set_value(v.get_value())
 
-        optimiser = theano.function(inputs=[l_0, l_1, x_0, x_1, beta, drop_mask_1],
+        optimiser = theano.function(inputs=[l_0, l_1, x_0, x_1, beta, drop_mask_0, drop_mask_1],
                                     outputs=[elbo, kl],
                                     updates=updates,
                                     allow_input_downcast=True,
@@ -2006,7 +2008,7 @@ class SGVBWordsVNMTJoint(object):
 
         return recognition_model
 
-    def symbolic_elbo(self, x_0, x_1, num_samples, beta=None, drop_mask_1=None):
+    def symbolic_elbo(self, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
 
         x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
         x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
@@ -2016,7 +2018,10 @@ class SGVBWordsVNMTJoint(object):
 
         kl = self.generative_model.kl(means_rec, covs_rec)  # N
 
-        x_0_embedded_dropped = x_0_embedded
+        if drop_mask_0 is None:
+            x_0_embedded_dropped = x_0_embedded
+        else:
+            x_0_embedded_dropped = x_0_embedded * T.shape_padright(drop_mask_0)
 
         log_p_x_0 = self.generative_model.log_p_x_0(z, x_0, x_0_embedded, x_0_embedded_dropped, self.all_embeddings_0)
         # (S*N)
@@ -2057,9 +2062,10 @@ class SGVBWordsVNMTJoint(object):
 
         beta = T.scalar('beta')
 
+        drop_mask_0 = T.matrix('drop_mask_0')  # N * max(L)
         drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
 
-        elbo, kl = self.symbolic_elbo(x_0, x_1, num_samples, beta, drop_mask_1)
+        elbo, kl = self.symbolic_elbo(x_0, x_1, num_samples, beta, drop_mask_0, drop_mask_1)
 
         grads = T.grad(-elbo, self.params, disconnected_inputs='ignore')
 
@@ -2075,7 +2081,7 @@ class SGVBWordsVNMTJoint(object):
             for u, v in zip(updates, saved_update.keys()):
                 u.set_value(v.get_value())
 
-        optimiser = theano.function(inputs=[x_0, x_1, beta, drop_mask_1],
+        optimiser = theano.function(inputs=[x_0, x_1, beta, drop_mask_0, drop_mask_1],
                                     outputs=[elbo, kl],
                                     updates=updates,
                                     allow_input_downcast=True,
