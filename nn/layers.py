@@ -776,7 +776,7 @@ class RNNSearchLayer(MergeLayer):
                 outgate.W_cell, (num_units, ), name="W_cell_to_outgate")
 
         self.W_alignment_z = self.add_param(init.Normal(0.1), (z_dim,), name='W_alignment_z')
-        self.W_alignment_h = self.add_param(init.Normal(0.1), (num_units,), name='W_alignment_h')
+        self.W_alignment_h = self.add_param(init.Normal(0.1), (num_units, 1), name='W_alignment_h')
 
         # Setup initial values for the cell and the hidden units
         if isinstance(cell_init, Layer):
@@ -860,7 +860,7 @@ class RNNSearchLayer(MergeLayer):
 
         # Same for hidden weight matrices
         W_hid_stacked = T.concatenate(
-            [self.W_hid_to_ingate, self.W_hid_to_forgetgate,
+            [self.W_alignment_h, self.W_hid_to_ingate, self.W_hid_to_forgetgate,
              self.W_hid_to_cell, self.W_hid_to_outgate], axis=1)
 
         W_context_stacked = T.concatenate(
@@ -896,14 +896,16 @@ class RNNSearchLayer(MergeLayer):
             if not self.precompute_input:
                 input_n = T.dot(input_n, W_in_stacked) + b_stacked
 
-            alignments_h = T.dot(hid_previous, self.W_alignment_h)  # N
+            hid_dot = T.dot(hid_previous, W_hid_stacked)
 
-            alignments = last_d_softmax(alignments_z + T.shape_padright(alignments_h))  # N * max(L)
+            alignments_h = hid_dot[:, 0]  # N
+
+            alignments = T.nnet.softmax(alignments_z + T.shape_padright(alignments_h))  # N * max(L)
 
             context = T.sum(T.shape_padright(alignments) * input_z, axis=1)  # N * z_dim
 
             # Calculate gates pre-activations and slice
-            gates = input_n + T.dot(hid_previous, W_hid_stacked) + T.dot(context, W_context_stacked)
+            gates = input_n + hid_dot[:, 1:] + T.dot(context, W_context_stacked)
 
             # Clip gradients
             if self.grad_clipping:
@@ -950,7 +952,7 @@ class RNNSearchLayer(MergeLayer):
             hid_init = T.dot(ones, self.hid_init)
 
         # The hidden-to-hidden weight matrix is always used in step
-        non_seqs = [input_z, alignments_z, W_hid_stacked, W_context_stacked, self.W_alignment_h]
+        non_seqs = [input_z, alignments_z, W_hid_stacked, W_context_stacked]
         # The "peephole" weight matrices are only used when self.peepholes=True
         if self.peepholes:
             non_seqs += [self.W_cell_to_ingate,

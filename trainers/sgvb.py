@@ -1677,14 +1677,16 @@ class SGVBWordsVNMT(object):
         z, means_rec, covs_rec = self.recognition_model.get_samples_and_means_and_covs(x_0, x_0_embedded, x_1,
                                                                                        x_1_embedded, num_samples)
 
-        kl = self.generative_model.kl(x_0, x_0_embedded, means_rec, covs_rec)  # N
+        h = self.generative_model.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        kl = self.generative_model.kl(h, x_0, means_rec, covs_rec)  # N
 
         if drop_mask_1 is None:
             x_1_embedded_dropped = x_1_embedded
         else:
             x_1_embedded_dropped = x_1_embedded * T.shape_padright(drop_mask_1)
 
-        log_p_x_1 = self.generative_model.log_p_x_1(x_0, x_0_embedded, z, x_1, x_1_embedded, x_1_embedded_dropped,
+        log_p_x_1 = self.generative_model.log_p_x_1(h, z, x_1, x_1_embedded, x_1_embedded_dropped,
                                                     self.all_embeddings_1)  # (S*N)
 
         if beta is None:
@@ -1749,9 +1751,11 @@ class SGVBWordsVNMT(object):
 
         x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
 
-        z, _ = self.generative_model.get_z_means_and_covs(x_0, x_0_embedded)  # N * dim(z)
+        h = self.generative_model.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
 
-        x_1 = self.generative_model.beam_search(x_0, x_0_embedded, z, self.all_embeddings_1, beam_size)  # N * max(L)
+        z, _ = self.generative_model.get_z_means_and_covs(h, x_0)  # N * dim(z)
+
+        x_1 = self.generative_model.beam_search(h, z, self.all_embeddings_1, beam_size)  # N * max(L)
 
         x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
 
@@ -1766,11 +1770,13 @@ class SGVBWordsVNMT(object):
 
         x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
 
-        z = self.generative_model.get_samples_z(x_0, x_0_embedded, num_samples)  # (S*N) * dim(z)
+        h = self.generative_model.get_h(x_0, x_0_embedded)  # N * max(L) * dim(hid)
 
-        log_p_z = self.generative_model.log_p_z(z, x_0, x_0_embedded)  # (S*N)
+        z = self.generative_model.get_samples_z(h, x_0, num_samples)  # (S*N) * dim(z)
 
-        x_1 = self.generative_model.beam_search_samples(x_0, x_0_embedded, z, log_p_z, self.all_embeddings_1, beam_size,
+        log_p_z = self.generative_model.log_p_z(h, z, x_0)  # (S*N)
+
+        x_1 = self.generative_model.beam_search_samples(h, z, log_p_z, self.all_embeddings_1, beam_size,
                                                         num_samples)  # N * max(L)
 
         x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
@@ -2026,10 +2032,7 @@ class SGVBWordsVNMTJoint(object):
         log_p_x_0 = self.generative_model.log_p_x_0(z, x_0, x_0_embedded, x_0_embedded_dropped, self.all_embeddings_0)
         # (S*N)
 
-        if drop_mask_1 is None:
-            x_1_embedded_dropped = x_1_embedded
-        else:
-            x_1_embedded_dropped = x_1_embedded * T.shape_padright(drop_mask_1)
+        x_1_embedded_dropped = x_1_embedded
 
         log_p_x_1 = self.generative_model.log_p_x_1(x_0, x_0_embedded, z, x_1, x_1_embedded, x_1_embedded_dropped,
                                                     self.all_embeddings_1)  # (S*N)
@@ -2111,11 +2114,14 @@ class SGVBWordsVNMTJoint(object):
 
         x_0 = T.imatrix('x_0')  # N * max(L)
 
+        N = x_0.shape[0]
+
         x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
 
-        z = self.generative_model.get_samples_z(x_0, x_0_embedded, num_samples)  # (S*N) * dim(z)
+        z = self.generative_model.get_samples_z(num_samples)  # S * dim(z)
+        z = T.tile(z, (N, 1))  # (S*N) * dim(z)
 
-        log_p_z = self.generative_model.log_p_z(z, x_0, x_0_embedded)  # (S*N)
+        log_p_z = self.generative_model.log_p_z(z)  # (S*N)
 
         x_1 = self.generative_model.beam_search_samples(x_0, x_0_embedded, z, log_p_z, self.all_embeddings_1, beam_size,
                                                         num_samples)  # N * max(L)
@@ -2123,6 +2129,183 @@ class SGVBWordsVNMTJoint(object):
         x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
 
         return theano.function(inputs=[x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )
+
+
+class SGVBWordsVNMTJointMultiIndicator(object):
+
+    def __init__(self, generative_model, recognition_model, num_langs, z_dim, max_length, vocab_size, embedding_dim,
+                 dist_z_gen, dist_x_1_gen, dist_z_rec, gen_nn_kwargs, rec_nn_kwargs, eos_ind):
+
+        self.num_langs = num_langs
+        self.z_dim = z_dim
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+
+        self.all_embeddings = theano.shared(np.float32(np.random.normal(0., 0.1, (num_langs, vocab_size,
+                                                                                  embedding_dim))))
+
+        self.dist_z_gen = dist_z_gen
+        self.dist_z_rec = dist_z_rec
+        self.dist_x_1_gen = dist_x_1_gen
+
+        self.gen_nn_kwargs = gen_nn_kwargs
+        self.rec_nn_kwargs = rec_nn_kwargs
+
+        self.generative_model = self.init_generative_model(generative_model)
+
+        self.recognition_model = self.init_recognition_model(recognition_model)
+
+        self.eos_ind = eos_ind
+
+        self.params = self.generative_model.get_params() + self.recognition_model.get_params() + [self.all_embeddings]
+
+    def init_generative_model(self, generative_model):
+
+        generative_model = generative_model(self.num_langs, self.z_dim, self.max_length, self.vocab_size,
+                                            self.embedding_dim, embedder, self.dist_z_gen, self.dist_x_1_gen,
+                                            self.gen_nn_kwargs)
+
+        return generative_model
+
+    def init_recognition_model(self, recognition_model):
+
+        recognition_model = recognition_model(self.num_langs, self.z_dim, self.max_length, self.embedding_dim,
+                                              self.dist_z_rec, self.rec_nn_kwargs)
+
+        return recognition_model
+
+    def symbolic_elbo(self, l_0, l_1, x_0, x_1, num_samples, beta=None, drop_mask_0=None, drop_mask_1=None):
+
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings[l_1])  # N * max(L) * E
+
+        z, means_rec, covs_rec = self.recognition_model.get_samples_and_means_and_covs(l_0, l_1, x_0, x_0_embedded, x_1,
+                                                                                       x_1_embedded, num_samples)
+
+        h = self.generative_model.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        kl = self.generative_model.kl(means_rec, covs_rec)  # N
+
+        if drop_mask_0 is None:
+            x_0_embedded_dropped = x_0_embedded
+        else:
+            x_0_embedded_dropped = x_0_embedded * T.shape_padright(drop_mask_0)
+
+        log_p_x_0 = self.generative_model.log_p_x_0(z, l_0, x_0, x_0_embedded, x_0_embedded_dropped,
+                                                    self.all_embeddings[l_0])  # (S*N)
+
+        x_1_embedded_dropped = x_1_embedded
+
+        log_p_x_1 = self.generative_model.log_p_x_1(l_1, h, z, x_1, x_1_embedded, x_1_embedded_dropped,
+                                                    self.all_embeddings[l_1])  # (S*N)
+
+        if beta is None:
+            elbo = T.mean(log_p_x_0 + log_p_x_1) - T.mean(kl)
+        else:
+            elbo = T.mean(log_p_x_0 + log_p_x_1) - T.mean(beta * kl)
+
+        return elbo, T.mean(kl)
+
+    def elbo_fn(self, num_samples):
+
+        l_0 = T.iscalar('l_0')  #
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(l_0, l_1, x_0, x_1, num_samples)
+
+        elbo_fn = theano.function(inputs=[l_0, l_1, x_0, x_1],
+                                  outputs=[elbo, kl],
+                                  allow_input_downcast=True,
+                                  )
+
+        return elbo_fn
+
+    def optimiser(self, num_samples, grad_norm_constraint, update, update_kwargs, saved_update=None):
+
+        l_0 = T.iscalar('l_0')  #
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        beta = T.scalar('beta')
+
+        drop_mask_0 = T.matrix('drop_mask_0')  # N * max(L)
+        drop_mask_1 = T.matrix('drop_mask_1')  # N * max(L)
+
+        elbo, kl = self.symbolic_elbo(l_0, l_1, x_0, x_1, num_samples, beta, drop_mask_0, drop_mask_1)
+
+        grads = T.grad(-elbo, self.params, disconnected_inputs='ignore')
+
+        if grad_norm_constraint is not None:
+            grads = [norm_constraint(g, grad_norm_constraint) if g.ndim > 1 else g for g in grads]
+
+        update_kwargs['loss_or_grads'] = grads
+        update_kwargs['params'] = self.params
+
+        updates = update(**update_kwargs)
+
+        if saved_update is not None:
+            for u, v in zip(updates, saved_update.keys()):
+                u.set_value(v.get_value())
+
+        optimiser = theano.function(inputs=[l_0, l_1, x_0, x_1, beta, drop_mask_0, drop_mask_1],
+                                    outputs=[elbo, kl],
+                                    updates=updates,
+                                    allow_input_downcast=True,
+                                    on_unused_input='ignore',
+                                    )
+
+        return optimiser, updates
+
+    def translate_fn(self, beam_size):
+
+        l_0 = T.iscalar('l_0')  #
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+
+        # h = self.generative_model.get_h(l_0, x_0, x_0_embedded)  # N * max(L) * dim(hid)
+
+        z = T.zeros((x_0.shape[0], self.z_dim))  # N * dim(z)
+
+        x_1 = self.generative_model.beam_search(l_0, l_1, x_0, x_0_embedded, z, self.all_embeddings[l_1], beam_size)
+        # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[l_0, l_1, x_0],
+                               outputs=x_1,
+                               allow_input_downcast=True,
+                               )
+
+    def translate_fn_sampling(self, beam_size, num_samples):
+
+        l_0 = T.iscalar('l_0')  #
+        l_1 = T.iscalar('l_1')  #
+        x_0 = T.imatrix('x_0')  # N * max(L)
+
+        N = x_0.shape[0]
+
+        x_0_embedded = embedder(x_0, self.all_embeddings[l_0])  # N * max(L) * E
+
+        z = self.generative_model.get_samples_z(num_samples)  # S * dim(z)
+        z = T.tile(z, (N, 1))  # (S*N) * dim(z)
+
+        log_p_z = self.generative_model.log_p_z(z, l_0, x_0, x_0_embedded)  # (S*N)
+
+        x_1 = self.generative_model.beam_search_samples(l_0, l_1, x_0, x_0_embedded, z, log_p_z,
+                                                        self.all_embeddings[l_1], beam_size, num_samples)  # N * max(L)
+
+        x_1 = cut_off(x_1, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[l_0, l_1, x_0],
                                outputs=x_1,
                                allow_input_downcast=True,
                                )

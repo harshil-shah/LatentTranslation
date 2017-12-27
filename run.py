@@ -2946,16 +2946,28 @@ class RunVNMT(object):
 
         if self.pre_trained:
 
-            with open(os.path.join(self.load_param_dir, 'all_embeddings_0.save'), 'rb') as f:
+            all_embeddings_0_files = sorted([f for f in os.listdir(self.load_param_dir) if
+                                             f.startswith('all_embeddings_0')])
+
+            all_embeddings_1_files = sorted([f for f in os.listdir(self.load_param_dir) if
+                                             f.startswith('all_embeddings_1')])
+
+            decoder_params_files = sorted([f for f in os.listdir(self.load_param_dir) if
+                                             f.startswith('decoder_params')])
+
+            encoder_params_files = sorted([f for f in os.listdir(self.load_param_dir) if
+                                           f.startswith('encoder_params')])
+
+            with open(os.path.join(self.load_param_dir, all_embeddings_0_files[-1]), 'rb') as f:
                 self.solver.all_embeddings_0.set_value(cPickle.load(f))
 
-            with open(os.path.join(self.load_param_dir, 'all_embeddings_1.save'), 'rb') as f:
+            with open(os.path.join(self.load_param_dir, all_embeddings_1_files[-1]), 'rb') as f:
                 self.solver.all_embeddings_1.set_value(cPickle.load(f))
 
-            with open(os.path.join(self.load_param_dir, 'decoder_params.save'), 'rb') as f:
+            with open(os.path.join(self.load_param_dir, decoder_params_files[-1]), 'rb') as f:
                 self.solver.generative_model.set_param_values(cPickle.load(f))
 
-            with open(os.path.join(self.load_param_dir, 'encoder_params.save'), 'rb') as f:
+            with open(os.path.join(self.load_param_dir, encoder_params_files[-1]), 'rb') as f:
                 self.solver.recognition_model.set_param_values(cPickle.load(f))
 
     def save_params(self, updates, suffix=''):
@@ -3046,23 +3058,33 @@ class RunVNMT(object):
         return x_0_train, x_1_train, x_0_val, x_1_val, x_0_test, x_1_test, L_0_train, L_1_train, L_0_val, L_1_val, \
             L_0_test, L_1_test
 
-    def call_translation_fn(self, translation_fn, x_in, x_out_true):
+    def call_translation_fn(self, translation_fn, x_in, x_out_true, sub_batch_size=50):
 
-        guess = translation_fn(x_in)
+        guesses = []
+
+        for x_in_batch, x_out_batch in chunker([x_in, x_out_true], sub_batch_size):
+            start = time.clock()
+
+            guess_batch = translation_fn(x_in_batch)
+            guesses.append(guess_batch)
+
+            print('batch translated (time taken = ' + str(time.clock() - start) + ' seconds)')
+
+        guess = np.concatenate(guesses, axis=0)
 
         out = OrderedDict()
 
-        out['true_x_from_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = x_in
-        out['true_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = x_out_true
-        out['gen_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1] = guess
+        out['true_x_from_for_translation_from_' + self.l_0 + '_to_' + self.l_1] = x_in
+        out['true_x_to_for_translation_from_' + self.l_0 + '_to_' + self.l_1] = x_out_true
+        out['gen_x_to_for_translation_from_' + self.l_0 + '_to_' + self.l_1] = guess
 
         return out
 
     def print_translations(self, translations):
 
-        x_in = translations['true_x_from_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
-        x_out_true = translations['true_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
-        x_out_gen = translations['gen_x_to_for_translation_from_' + self.l_0 + ' to ' + self.l_1]
+        x_in = translations['true_x_from_for_translation_from_' + self.l_0 + '_to_' + self.l_1]
+        x_out_true = translations['true_x_to_for_translation_from_' + self.l_0 + '_to_' + self.l_1]
+        x_out_gen = translations['gen_x_to_for_translation_from_' + self.l_0 + '_to_' + self.l_1]
 
         print('='*10)
         print('translations ' + self.l_0 + ' to ' + self.l_1)
@@ -3179,7 +3201,7 @@ class RunVNMT(object):
 
         self.save_params(updates)
 
-    def translate(self, num_outputs, beam_size=15, sampling=False, num_samples=0):
+    def translate(self, num_outputs, beam_size=15, sampling=False, num_samples=0, sub_batch_size=50):
 
         np.random.seed(1234)
 
@@ -3194,7 +3216,7 @@ class RunVNMT(object):
             translation_fn = self.solver.translate_fn(beam_size)
             suffix = '.npy'
 
-        translations = self.call_translation_fn(translation_fn, batch_0, batch_1)
+        translations = self.call_translation_fn(translation_fn, batch_0, batch_1, sub_batch_size)
 
         for key, value in translations.items():
             np.save(os.path.join(self.out_dir, key + suffix), value)
@@ -3380,15 +3402,26 @@ class RunVNMTMultiIndicator(object):
 
         return x_only, x_both, x_val, x_test, L_only, L_both, L_val, L_test
 
-    def call_translation_fn(self, translation_fn, l_in, l_out, x_in, x_out_true):
+    def call_translation_fn(self, translation_fn, l_in, l_out, x_in, x_out_true, sub_batch_size=50):
 
-        l_in_rep = np.array([l_in]*x_in.shape[0])
+        guesses = []
 
-        guess = translation_fn(l_in_rep, l_out, x_in)
+        for x_in_batch, x_out_batch in chunker([x_in, x_out_true], sub_batch_size):
+
+            start = time.clock()
+
+            l_in_rep = np.array([l_in]*x_in_batch.shape[0])
+
+            guess_batch = translation_fn(l_in_rep, l_out, x_in_batch)
+            guesses.append(guess_batch)
+
+            print('batch translated (time taken = ' + str(time.clock() - start) + ' seconds)')
+
+        guess = np.concatenate(guesses, axis=0)
 
         out = OrderedDict()
 
-        suffix = '_for_translation_from_' + self.langs[l_in] + ' to ' + self.langs[l_out]
+        suffix = '_for_translation_from_' + self.langs[l_in] + '_to_' + self.langs[l_out]
 
         out['true_x_from' + suffix] = x_in
         out['true_x_to' + suffix] = x_out_true
@@ -3398,7 +3431,7 @@ class RunVNMTMultiIndicator(object):
 
     def print_translations(self, translations, l_in, l_out):
 
-        suffix = '_for_translation_from_' + self.langs[l_in] + ' to ' + self.langs[l_out]
+        suffix = '_for_translation_from_' + self.langs[l_in] + '_to_' + self.langs[l_out]
 
         x_in = translations['true_x_from' + suffix]
         x_out_true = translations['true_x_to' + suffix]
@@ -3430,9 +3463,9 @@ class RunVNMTMultiIndicator(object):
         return drop_mask
 
     def train(self, n_iter, only_batch_size, both_batch_size, num_samples, ssl=True, word_drop=None,
-              grad_norm_constraint=None, update=adam, update_kwargs=None, warm_up=None, early_stopping_freq=None,
-              early_stopping_num_samples=5, early_stopping_patience=5, print_freq=None, print_batch_size=5,
-              print_beam_size=15, save_params_every=None):
+              grad_norm_constraint=None, update=adam, update_kwargs=None, warm_up=None, exclude_lang_pair=(),
+              early_stopping_freq=None, early_stopping_num_samples=5, early_stopping_patience=5, print_freq=None,
+              print_batch_size=5, print_beam_size=15, save_params_every=None):
 
         if self.pre_trained:
             with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
@@ -3492,40 +3525,42 @@ class RunVNMTMultiIndicator(object):
 
                     else:
 
-                        ls_l_0.append(np.array([l_0]*both_batch_size))
+                        if l_0 not in exclude_lang_pair or l_1 not in exclude_lang_pair:
 
-                        min_l = min((l_0, l_1))
-                        max_l = max((l_0, l_1))
+                            ls_l_0.append(np.array([l_0]*both_batch_size))
 
-                        pair = (min_l, max_l)
+                            min_l = min((l_0, l_1))
+                            max_l = max((l_0, l_1))
 
-                        batch_indices_both = np.random.choice(len(self.x_both[pair][0]), both_batch_size)
+                            pair = (min_l, max_l)
 
-                        if min_l == l_0:
-                            batch_both_l_0 = self.x_both[pair][0][batch_indices_both]
-                            batch_both_l_1 = self.x_both[pair][1][batch_indices_both]
-                        else:
-                            batch_both_l_0 = self.x_both[pair][1][batch_indices_both]
-                            batch_both_l_1 = self.x_both[pair][0][batch_indices_both]
+                            batch_indices_both = np.random.choice(len(self.x_both[pair][0]), both_batch_size)
 
-                        batches_l_0.append(batch_both_l_0)
-                        batches_l_1.append(batch_both_l_1)
-
-                        if word_drop is not None:
                             if min_l == l_0:
-                                L_both_l_0 = self.L_both[pair][0][batch_indices_both]
-                                L_both_l_1 = self.L_both[pair][1][batch_indices_both]
+                                batch_both_l_0 = self.x_both[pair][0][batch_indices_both]
+                                batch_both_l_1 = self.x_both[pair][1][batch_indices_both]
                             else:
-                                L_both_l_0 = self.L_both[pair][1][batch_indices_both]
-                                L_both_l_1 = self.L_both[pair][0][batch_indices_both]
-                            drop_mask_both_l_0 = self.make_drop_mask(word_drop, L_both_l_0)
-                            drop_mask_both_l_1 = self.make_drop_mask(word_drop, L_both_l_1)
-                        else:
-                            drop_mask_both_l_0 = np.ones_like(batch_both_l_0)
-                            drop_mask_both_l_1 = np.ones_like(batch_both_l_1)
+                                batch_both_l_0 = self.x_both[pair][1][batch_indices_both]
+                                batch_both_l_1 = self.x_both[pair][0][batch_indices_both]
 
-                        drop_masks_l_0.append(drop_mask_both_l_0)
-                        drop_masks_l_1.append(drop_mask_both_l_1)
+                            batches_l_0.append(batch_both_l_0)
+                            batches_l_1.append(batch_both_l_1)
+
+                            if word_drop is not None:
+                                if min_l == l_0:
+                                    L_both_l_0 = self.L_both[pair][0][batch_indices_both]
+                                    L_both_l_1 = self.L_both[pair][1][batch_indices_both]
+                                else:
+                                    L_both_l_0 = self.L_both[pair][1][batch_indices_both]
+                                    L_both_l_1 = self.L_both[pair][0][batch_indices_both]
+                                drop_mask_both_l_0 = self.make_drop_mask(word_drop, L_both_l_0)
+                                drop_mask_both_l_1 = self.make_drop_mask(word_drop, L_both_l_1)
+                            else:
+                                drop_mask_both_l_0 = np.ones_like(batch_both_l_0)
+                                drop_mask_both_l_1 = np.ones_like(batch_both_l_1)
+
+                            drop_masks_l_0.append(drop_mask_both_l_0)
+                            drop_masks_l_1.append(drop_mask_both_l_1)
 
                 ls_l_0 = np.concatenate(ls_l_0, axis=0)
 
@@ -3623,7 +3658,7 @@ class RunVNMTMultiIndicator(object):
 
         self.save_params(updates)
 
-    def translate(self, num_outputs, beam_size=15, sampling=False, num_samples=0):
+    def translate(self, num_outputs, beam_size=15, sampling=False, num_samples=0, sub_batch_size=50):
 
         np.random.seed(1234)
 
@@ -3640,12 +3675,216 @@ class RunVNMTMultiIndicator(object):
             batch_l_0 = self.x_test[pair][0][batch_indices]
             batch_l_1 = self.x_test[pair][1][batch_indices]
 
-            translations_0_to_1 = self.call_translation_fn(translation_fn, pair[0], pair[1], batch_l_0, batch_l_1)
+            translations_0_to_1 = self.call_translation_fn(translation_fn, pair[0], pair[1], batch_l_0, batch_l_1,
+                                                           sub_batch_size)
 
             for key, value in translations_0_to_1.items():
                 np.save(os.path.join(self.out_dir, key + suffix), value)
 
-            translations_1_to_0 = self.call_translation_fn(translation_fn, pair[1], pair[0], batch_l_1, batch_l_0)
+            translations_1_to_0 = self.call_translation_fn(translation_fn, pair[1], pair[0], batch_l_1, batch_l_0,
+                                                           sub_batch_size)
 
             for key, value in translations_1_to_0.items():
                 np.save(os.path.join(self.out_dir, key + suffix), value)
+
+
+class RunVNMTJointMultiIndicator(RunVNMTMultiIndicator):
+
+    def call_translation_fn(self, translation_fn, l_in, l_out, x_in, x_out_true, sub_batch_size=50):
+
+        guesses = []
+
+        for x_in_batch, x_out_batch in chunker([x_in, x_out_true], sub_batch_size):
+
+            start = time.clock()
+
+            guess_batch = translation_fn(l_in, l_out, x_in_batch)
+            guesses.append(guess_batch)
+
+            print('batch translated (time taken = ' + str(time.clock() - start) + ' seconds)')
+
+        guess = np.concatenate(guesses, axis=0)
+
+        out = OrderedDict()
+
+        suffix = '_for_translation_from_' + self.langs[l_in] + '_to_' + self.langs[l_out]
+
+        out['true_x_from' + suffix] = x_in
+        out['true_x_to' + suffix] = x_out_true
+        out['gen_x_to' + suffix] = guess
+
+        return out
+
+    def train(self, n_iter, only_batch_size, both_batch_size, num_samples, ssl=True, word_drop=None,
+              grad_norm_constraint=None, update=adam, update_kwargs=None, warm_up=None, exclude_lang_pair=(),
+              early_stopping_freq=None, early_stopping_num_samples=5, early_stopping_patience=5, print_freq=None,
+              print_batch_size=5, print_beam_size=15, save_params_every=None):
+
+        if self.pre_trained:
+            with open(os.path.join(self.load_param_dir, 'updates.save'), 'rb') as f:
+                saved_update = cPickle.load(f)
+            np.random.seed()
+        else:
+            saved_update = None
+
+        optimiser, updates = self.solver.optimiser(num_samples=num_samples, grad_norm_constraint=grad_norm_constraint,
+                                                   update=update, update_kwargs=update_kwargs,
+                                                   saved_update=saved_update)
+
+        elbo_fn = self.solver.elbo_fn(early_stopping_num_samples)
+
+        translation_fn = self.solver.translate_fn(print_beam_size)
+
+        val_elbo_best = -np.inf
+        early_stopping_done = False
+        early_stopping_evals_wo_improv = 0
+
+        for i in range(n_iter):
+
+            start = time.clock()
+
+            beta = 1. if warm_up is None or i > warm_up else float(i) / warm_up
+
+            for l_1 in range(self.num_langs):
+
+                for l_0 in range(self.num_langs):
+
+                    if l_0 == l_1:
+
+                        if ssl:
+
+                            batch_indices_only = np.random.choice(len(self.x_only[l_1]), only_batch_size)
+                            batch_only_l = self.x_only[l_1][batch_indices_only]
+
+                            if word_drop is not None:
+                                L_only_l = self.L_only[l_1][batch_indices_only]
+                                drop_mask_only_l = self.make_drop_mask(word_drop, L_only_l)
+                            else:
+                                drop_mask_only_l = np.ones_like(batch_only_l)
+
+                            elbo, kl = optimiser(l_0, l_1, batch_only_l, batch_only_l, beta, drop_mask_only_l,
+                                                 drop_mask_only_l)
+
+                            print('Iteration ' + str(i + 1) + ' ' + self.langs[l_0] + ' to ' + self.langs[l_1] +
+                                  ': ELBO = ' + str(elbo) + ' (KL = ' + str(kl) + ') per data point (time taken = ' +
+                                  str(time.clock() - start) + ' seconds)')
+
+                    else:
+
+                        if l_0 not in exclude_lang_pair or l_1 not in exclude_lang_pair:
+
+                            min_l = min((l_0, l_1))
+                            max_l = max((l_0, l_1))
+
+                            pair = (min_l, max_l)
+
+                            batch_indices_both = np.random.choice(len(self.x_both[pair][0]), both_batch_size)
+
+                            if min_l == l_0:
+                                batch_both_l_0 = self.x_both[pair][0][batch_indices_both]
+                                batch_both_l_1 = self.x_both[pair][1][batch_indices_both]
+                            else:
+                                batch_both_l_0 = self.x_both[pair][1][batch_indices_both]
+                                batch_both_l_1 = self.x_both[pair][0][batch_indices_both]
+
+                            if word_drop is not None:
+                                if min_l == l_0:
+                                    L_both_l_0 = self.L_both[pair][0][batch_indices_both]
+                                    L_both_l_1 = self.L_both[pair][1][batch_indices_both]
+                                else:
+                                    L_both_l_0 = self.L_both[pair][1][batch_indices_both]
+                                    L_both_l_1 = self.L_both[pair][0][batch_indices_both]
+                                drop_mask_both_l_0 = self.make_drop_mask(word_drop, L_both_l_0)
+                                drop_mask_both_l_1 = self.make_drop_mask(word_drop, L_both_l_1)
+                            else:
+                                drop_mask_both_l_0 = np.ones_like(batch_both_l_0)
+                                drop_mask_both_l_1 = np.ones_like(batch_both_l_1)
+
+                            elbo, kl = optimiser(l_0, l_1, batch_both_l_0, batch_both_l_1, beta, drop_mask_both_l_0,
+                                                 drop_mask_both_l_1)
+
+                            print('Iteration ' + str(i + 1) + ' ' + self.langs[l_0] + ' to ' + self.langs[l_1] +
+                                  ': ELBO = ' + str(elbo) + ' (KL = ' + str(kl) + ') per data point (time taken = ' +
+                                  str(time.clock() - start) + ' seconds)')
+
+            if print_freq is not None and i % print_freq == 0:
+
+                for pair in combinations(range(self.num_langs), 2):
+
+                    translation_batch_indices_l = np.random.choice(len(self.x_test[pair][0]), print_batch_size)
+                    translation_batch_l_0 = self.x_test[pair][0][translation_batch_indices_l]
+                    translation_batch_l_1 = self.x_test[pair][1][translation_batch_indices_l]
+
+                    translations_0_to_1 = self.call_translation_fn(translation_fn, pair[0], pair[1],
+                                                                   translation_batch_l_0, translation_batch_l_1)
+
+                    self.print_translations(translations_0_to_1, pair[0], pair[1])
+
+                    translations_1_to_0 = self.call_translation_fn(translation_fn, pair[1], pair[0],
+                                                                   translation_batch_l_1, translation_batch_l_0)
+
+                    self.print_translations(translations_1_to_0, pair[1], pair[0])
+
+            if early_stopping_freq is not None and i % early_stopping_freq == 0:
+
+                val_elbo = 0
+                val_kl = 0
+
+                for pair in combinations(range(self.num_langs), 2):
+
+                    val_elbo_0_to_1 = 0
+                    val_kl_0_to_1 = 0
+
+                    val_elbo_1_to_0 = 0
+                    val_kl_1_to_0 = 0
+
+                    for val_batch_l_0, val_batch_l_1 in chunker([self.x_val[pair][0], self.x_val[pair][1]], 100):
+
+                        val_elbo_0_to_1_batch, val_kl_0_to_1_batch = elbo_fn(pair[0], pair[1], val_batch_l_0,
+                                                                             val_batch_l_1)
+
+                        val_elbo_0_to_1 += val_elbo_0_to_1_batch * len(val_batch_l_0)
+                        val_kl_0_to_1 += val_kl_0_to_1_batch * len(val_batch_l_0)
+
+                        val_elbo_1_to_0_batch, val_kl_1_to_0_batch = elbo_fn(pair[1], pair[0], val_batch_l_1,
+                                                                             val_batch_l_0)
+
+                        val_elbo_1_to_0 += val_elbo_1_to_0_batch * len(val_batch_l_0)
+                        val_kl_1_to_0 += val_kl_1_to_0_batch * len(val_batch_l_0)
+
+                    val_elbo_0_to_1 /= len(self.x_val[pair][0])
+                    val_kl_0_to_1 /= len(self.x_val[pair][0])
+                    val_elbo_1_to_0 /= len(self.x_val[pair][0])
+                    val_kl_1_to_0 /= len(self.x_val[pair][0])
+
+                    print('Test set ELBO ' + self.langs[pair[0]] + ' to ' + self.langs[pair[1]] + ' = ' +
+                          str(val_elbo_0_to_1) + ' (KL = ' + str(val_kl_0_to_1) + ') per data point')
+
+                    val_elbo += val_elbo_0_to_1
+                    val_kl += val_kl_0_to_1
+
+                    print('Test set ELBO ' + self.langs[pair[1]] + ' to ' + self.langs[pair[0]] + ' = ' +
+                          str(val_elbo_1_to_0) + ' (KL = ' + str(val_kl_1_to_0) + ') per data point')
+
+                    val_elbo += val_elbo_1_to_0
+                    val_kl += val_kl_1_to_0
+
+                val_elbo /= len(list(combinations(range(self.num_langs), 2))) * 2
+                val_kl /= len(list(combinations(range(self.num_langs), 2))) * 2
+
+                print('Test set ELBO average = ' + str(val_elbo) + ' (KL = ' + str(val_kl) + ') per data point')
+
+                if val_elbo > val_elbo_best:
+                    val_elbo_best = val_elbo
+                    early_stopping_evals_wo_improv = 0
+                else:
+                    early_stopping_evals_wo_improv += 1
+                    if not early_stopping_done and early_stopping_evals_wo_improv > early_stopping_patience:
+                        self.save_params(updates, suffix='_early_stopping_' + str(i))
+                        early_stopping_done = True
+
+            if save_params_every is not None and i % save_params_every == 0 and i > 0:
+
+                self.save_params(updates)
+
+        self.save_params(updates)

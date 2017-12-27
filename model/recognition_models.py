@@ -777,8 +777,8 @@ class RecRNNSplitForwardBackwardMeanMutliIndicator(RecRNNSplitForwardBackwardMut
         l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
         l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
 
-        rnn_input_0 = T.concatenate((x_0_embedded, l_0_rep), axis=-1)  # N * max(L) * (E + num_l)
-        rnn_input_1 = T.concatenate((x_1_embedded, l_1_rep), axis=-1)  # N * max(L) * (E + num_l)
+        rnn_input_0 = T.cast(T.concatenate((x_0_embedded, l_0_rep), axis=-1), 'float32')  # N * max(L) * (E + num_l)
+        rnn_input_1 = T.cast(T.concatenate((x_1_embedded, l_1_rep), axis=-1), 'float32')  # N * max(L) * (E + num_l)
 
         h_forward_0 = self.rnn[0].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
         h_backward_0 = self.rnn[1].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
@@ -802,6 +802,39 @@ class RecRNNSplitForwardBackwardMeanMutliIndicator(RecRNNSplitForwardBackwardMut
         covs = get_output(self.cov_nn, hid)  # N * dim(z)
 
         return means, covs
+
+
+class RecRNNSplitForwardBackwardMeanMutliIndicatorScalarL0(RecRNNSplitForwardBackwardMeanMutliIndicator):
+
+    def get_hid(self, l_0, l_1, x_0, x_0_embedded, x_1, x_1_embedded):
+
+        N = x_0.shape[0]
+
+        mask_0 = T.ge(x_0, 0)  # N * max(L)
+        mask_1 = T.ge(x_1, 0)  # N * max(L)
+
+        l_0_one_hot = T.extra_ops.to_one_hot(l_0.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_0_rep = T.tile(T.shape_padleft(l_0_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        l_1_one_hot = T.extra_ops.to_one_hot(l_1.reshape((1,)), self.num_langs)  # 1 * num_l
+        l_1_rep = T.tile(T.shape_padleft(l_1_one_hot, 1), (N, self.max_length, 1))  # N * max(L) * num_l
+
+        rnn_input_0 = T.cast(T.concatenate((x_0_embedded, l_0_rep), axis=-1), 'float32')  # N * max(L) * (E + num_l)
+        rnn_input_1 = T.cast(T.concatenate((x_1_embedded, l_1_rep), axis=-1), 'float32')  # N * max(L) * (E + num_l)
+
+        h_forward_0 = self.rnn[0].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_backward_0 = self.rnn[1].get_output_for([rnn_input_0, mask_0])  # N * max(L) * (dim(hid)/2)
+        h_0 = T.concatenate([h_forward_0, h_backward_0], axis=-1)  # N * max(L) * dim(hid)
+
+        h_0_avg = T.sum(h_0, axis=1) / T.shape_padright(T.sum(mask_0, axis=1))  # N * dim(hid)
+
+        h_forward_1 = self.rnn[2].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_backward_1 = self.rnn[3].get_output_for([rnn_input_1, mask_1])  # N * max(L) * (dim(hid)/2)
+        h_1 = T.concatenate([h_forward_1, h_backward_1], axis=-1)  # N * max(L) * dim(hid)
+
+        h_1_avg = T.sum(h_1, axis=1) / T.shape_padright(T.sum(mask_1, axis=1))  # N * dim(hid)
+
+        return T.concatenate([h_0_avg, h_1_avg], axis=-1)  # N * (2*dim(hid))
 
 
 class RecRNNSplitForwardBackwardAttention(RecModel):
