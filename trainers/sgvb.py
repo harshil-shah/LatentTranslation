@@ -2133,6 +2133,56 @@ class SGVBWordsVNMTJoint(object):
                                allow_input_downcast=True,
                                )
 
+    def translate_fn_banana(self, beam_size, num_samples):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+
+        z, _, _ = self.recognition_model.get_samples_and_means_and_covs(x_0, x_0_embedded, x_1, x_1_embedded,
+                                                                        num_samples)  # (S*N) * dim(z)
+
+        log_p_z = self.generative_model.log_p_z(z)  # (S*N)
+
+        x_1_new = self.generative_model.beam_search_samples(x_0, x_0_embedded, z, log_p_z, self.all_embeddings_1,
+                                                            beam_size, num_samples)  # N * max(L)
+
+        x_1_new = cut_off(x_1_new, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[x_0, x_1],
+                               outputs=x_1_new,
+                               allow_input_downcast=True,
+                               )
+
+    def impute_missing_words_and_translate_fn(self, beam_size):
+
+        x_0 = T.imatrix('x_0')  # N * max(L)
+        x_1 = T.imatrix('x_1')  # N * max(L)
+        missing_words_mask = T.imatrix('missing_words_mask')  # N * max(L)
+
+        x_0_embedded = embedder(x_0, self.all_embeddings_0)  # N * max(L) * E
+        x_1_embedded = embedder(x_1, self.all_embeddings_1)  # N * max(L) * E
+
+        z, _, _ = self.recognition_model.get_samples_and_means_and_covs(x_0, x_0_embedded, x_1, x_1_embedded, 1,
+                                                                        means_only=True)  # N * dim(z)
+
+        x_0_new = self.generative_model.impute_missing_words_x_0(z, x_0, missing_words_mask, self.all_embeddings_0,
+                                                                 beam_size)
+
+        x_0_new_embedded = embedder(x_0_new, self.all_embeddings_0)  # N * max(L) * E
+
+        x_1_new = self.generative_model.beam_search(x_0_new, x_0_new_embedded, z, self.all_embeddings_1, beam_size)
+        # N * max(L)
+
+        x_1_new = cut_off(x_1_new, self.eos_ind)  # N * max(L)
+
+        return theano.function(inputs=[x_0, x_1, missing_words_mask],
+                               outputs=[x_0_new, x_1_new],
+                               allow_input_downcast=True,
+                               )
+
 
 class SGVBWordsVNMTJointMultiIndicator(object):
 
